@@ -680,3 +680,60 @@
                 <a href="#" onclick="openLink('tradingBot')">Trading Bot</a>
                 <a href="#" onclick="openLink('botShop')">BotShop</a>
                 <a href="#" onclick="openLink('academy')
+html                <a href="#" onclick="openLink('academy')">Academy</a>
+            </div>
+            <div class="footer-section">
+                <h3>יצירת קשר</h3>
+                <a href="#" onclick="openLink('telegram')">טלגרם</a>
+                <a href="#" onclick="openLink('email')">אימייל</a>
+                <a href="#" onclick="openLink('github')">GitHub</a>
+                <a href="#" onclick="openLink('twitter')">Twitter</a>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>© 2025 SLH Ecosystem. כל הזכויות שמורות.</p>
+            <p style="margin-top: 0.5rem; font-size: 0.9rem;">
+                <a href="#" style="color: inherit; text-decoration: none;">תנאי שימוש</a> | 
+                <a href="#" style="color: inherit; text-decoration: none;">מדיניות פרטיות</a>
+            </p>
+        </div>
+    </footer>
+    
+    <!-- JavaScript -->
+    <script>
+        // פונקציה לפתיחת קישורים מה-GLOBAL_LINKS
+        function openLink(key) {
+            const url = GLOBAL_LINKS[key];
+            if (url) {
+                // אם זה אימייל
+                if (key === 'email') {
+                    window.location.href = 'mailto:' + url;
+                } else {
+                    window.open(url, '_blank');
+                }
+            } else {
+                alert('הקישור עדיין לא הוגדר. ערוך את GLOBAL_LINKS בתחילת הקובץ.');
+            }
+            return false;
+        }
+        
+        // Smooth scroll
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                const href = this.getAttribute('href');
+                if (href !== '#' && !this.hasAttribute('onclick')) {
+                    e.preventDefault();
+                    const target = document.querySelector(href);
+                    if (target) {
+                        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                }
+            });
+        });
+        
+        // קונסול הודעה
+        console.log('%c🚀 SLH Ecosystem', 'font-size: 24px; font-weight: bold; color: #6D4AFF;');
+        console.log('%cלעדכון קישורים: ערוך את אובייקט GLOBAL_LINKS בתחילת הקובץ', 'font-size: 14px; color: #00F0FF;');
+    </script>
+</body>
+</html>
