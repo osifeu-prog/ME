@@ -1,7 +1,8 @@
+# bot.py
 import os
 import logging
-from datetime import datetime, timezone, timedelta
 import asyncio
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
@@ -18,9 +19,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # ---------- Env ----------
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.example.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://web-production-112f6.up.railway.app
 DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "binance")
-ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")  # optional: Telegram numeric user id for admin-only ops
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")  # optional numeric Telegram id
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in environment")
@@ -37,6 +38,7 @@ logger = logging.getLogger("telegram-webhook-bot")
 # ---------- FastAPI app ----------
 app = FastAPI(title="Telegram Webhook Trade Bot")
 application: Application | None = None
+_ready = False  # readiness flag: becomes True after successful set_webhook
 
 # ---------- Utilities ----------
 def fmt_ts(ts: datetime) -> str:
@@ -278,28 +280,42 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("correlate", correlate_cmd))
     return app
 
-# ---------- FastAPI lifecycle: webhook mode ----------
+# ---------- FastAPI lifecycle: webhook mode with retries and debug ----------
 @app.on_event("startup")
 async def on_startup():
-    global application
-    logger.info("Starting application in webhook mode...")
+    global application, _ready
+    logger.info("Startup: building Telegram Application (webhook mode)...")
     application = build_application()
     webhook_endpoint = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
-    # remove any existing webhook first to avoid conflicts
+
+    # try to delete existing webhook (non-fatal)
     try:
-        await application.bot.delete_webhook()
+        await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Deleted existing webhook (if any)")
     except Exception as e:
-        logger.debug(f"delete_webhook non-fatal: {e}")
-    # set webhook on telegram with retries
-    max_retries = 3
+        logger.debug("delete_webhook non-fatal: %s", e)
+
+    # attempt to set webhook with retries and logging of responses
+    max_retries = 5
     for attempt in range(1, max_retries + 1):
         try:
-            await application.bot.set_webhook(url=webhook_endpoint)
-            logger.info(f"Webhook set to {webhook_endpoint}")
+            resp = await application.bot.set_webhook(url=webhook_endpoint)
+            logger.info("set_webhook response: %s", resp)
+            # verify via getWebhookInfo
+            try:
+                info = await application.bot.get_webhook_info()
+                # info may be a telegram.WebhookInfo object; convert to dict if possible
+                try:
+                    info_dict = info.to_dict()
+                except Exception:
+                    info_dict = str(info)
+                logger.info("getWebhookInfo after set: %s", info_dict)
+            except Exception as e:
+                logger.warning("get_webhook_info check failed: %s", e)
+            _ready = True
             break
         except Exception as e:
-            logger.warning(f"Attempt {attempt} to set webhook failed: {e}")
+            logger.warning("Attempt %d to set webhook failed: %s", attempt, e)
             if attempt < max_retries:
                 await asyncio.sleep(2 ** attempt)
             else:
@@ -314,7 +330,7 @@ async def on_shutdown():
             await application.bot.delete_webhook()
             await application.stop()
     except Exception as e:
-        logger.warning(f"Shutdown issue: {e}")
+        logger.warning("Shutdown issue: %s", e)
 
 # ---------- Webhook endpoint ----------
 @app.post(f"/{TELEGRAM_BOT_TOKEN}")
@@ -330,12 +346,51 @@ async def telegram_webhook(request: Request):
         logger.exception("Failed to process incoming update")
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
+# ---------- Debug endpoints (safe for admin use) ----------
+@app.get("/debug/webhookInfo")
+async def debug_webhook_info():
+    if application is None:
+        return JSONResponse({"ok": False, "error": "application not ready"}, status_code=503)
+    try:
+        info = await application.bot.get_webhook_info()
+        try:
+            payload = info.to_dict()
+        except Exception:
+            payload = str(info)
+        return JSONResponse({"ok": True, "webhook_info": payload})
+    except Exception as e:
+        logger.exception("debug/getWebhookInfo failed")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/debug/setWebhookManual")
+async def debug_set_webhook_manual():
+    if application is None:
+        return JSONResponse({"ok": False, "error": "application not ready"}, status_code=503)
+    webhook_endpoint = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+    try:
+        resp = await application.bot.set_webhook(url=webhook_endpoint)
+        logger.info("Manual set_webhook response: %s", resp)
+        info = await application.bot.get_webhook_info()
+        try:
+            info_dict = info.to_dict()
+        except Exception:
+            info_dict = str(info)
+        return JSONResponse({"ok": True, "set_response": resp, "webhook_info": info_dict})
+    except Exception as e:
+        logger.exception("Manual set_webhook failed")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
 # ---------- Health ----------
 @app.get("/health")
 async def health():
     webhook_endpoint = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
+    status = "ready" if _ready else "starting"
     return JSONResponse({
-        "status": "ok",
+        "status": status,
         "service": "SLH PROMO investors bot",
         "webhook": webhook_endpoint,
         "time": fmt_ts(datetime.now(timezone.utc))
