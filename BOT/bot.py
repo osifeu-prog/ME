@@ -1,5 +1,4 @@
 import os
-import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -8,7 +7,7 @@ import pandas as pd
 import yfinance as yf
 import ccxt
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
@@ -19,20 +18,22 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "binance")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in environment")
+if not WEBHOOK_URL:
+    raise RuntimeError("WEBHOOK_URL is missing in environment")
 
 # ---------- Logging ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-logger = logging.getLogger("railway-trade-bot")
+logger = logging.getLogger("telegram-webhook-bot")
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Trade Bot Service")
-bot_task: asyncio.Task | None = None
 application: Application | None = None
 
 # ---------- Utils ----------
@@ -72,13 +73,8 @@ def resolve_symbol(symbol: str) -> str:
 
 # ---------- CCXT ----------
 def get_exchange(name: str = DEFAULT_EXCHANGE):
-    try:
-        ex_class = getattr(ccxt, name)
-        ex = ex_class({"enableRateLimit": True, "timeout": 10000})
-        return ex
-    except Exception as e:
-        logger.exception("Exchange init failed")
-        raise RuntimeError(f"Exchange '{name}' not available: {e}") from e
+    ex_class = getattr(ccxt, name)
+    return ex_class({"enableRateLimit": True, "timeout": 10000})
 
 async def ccxt_ticker(symbol: str, exchange_name: str = DEFAULT_EXCHANGE):
     loop = asyncio.get_event_loop()
@@ -136,12 +132,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "ברוך הבא לבוט נתוני שוק.\n\n"
         "פקודות:\n"
-        "/price <symbol> — מחיר אחרון (למשל BTCUSDT)\n"
-        "/ohlcv <symbol> <timeframe> — נר אחרון (ברירת מחדל 1m)\n"
-        "/indicators <symbol> — SMA/RSI בסיסי\n"
-        "/correlate <symbols...> — קורולציות (למשל BTCUSD DXY CL=F)\n"
-        "/help — עזרה\n\n"
-        "המידע לצורכי אינפורמציה בלבד, לא ייעוץ או המלצה."
+        "/price <symbol>\n"
+        "/ohlcv <symbol> <timeframe>\n"
+        "/indicators <symbol>\n"
+        "/correlate <symbols...>\n"
+        "/help\n\n"
+        "המידע לצורכי אינפורמציה בלבד."
     )
     await update.message.reply_text(text)
 
@@ -150,110 +146,53 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("שימוש: /price <symbol>\nדוגמה: /price BTCUSDT")
+        await update.message.reply_text("שימוש: /price <symbol>")
         return
-    raw = context.args[0]
-    symbol = normalize_symbol_for_exchange(raw)
+    symbol = normalize_symbol_for_exchange(context.args[0])
     try:
         t = await ccxt_ticker(symbol)
         price = safe_float(t.get("last"))
-        bid = safe_float(t.get("bid"))
-        ask = safe_float(t.get("ask"))
         ts = t.get("datetime") or fmt_ts(datetime.now(timezone.utc))
-        text = (
-            f"סימול: {symbol}\n"
-            f"מחיר אחרון: {price}\n"
-            f"Bid: {bid} | Ask: {ask}\n"
-            f"זמן: {ts}\n"
-            f"בורסה: {DEFAULT_EXCHANGE}"
-        )
+        text = f"{symbol} מחיר אחרון: {price}\nזמן: {ts}"
         await update.message.reply_text(text)
     except Exception as e:
-        logger.exception("price_cmd error")
-        await update.message.reply_text(f"נכשל בקבלת מחיר ל-{symbol}: {e}")
+        await update.message.reply_text(f"שגיאה: {e}")
 
 async def ohlcv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("שימוש: /ohlcv <symbol> <timeframe>\nדוגמה: /ohlcv BTCUSDT 5m")
+        await update.message.reply_text("שימוש: /ohlcv <symbol> <timeframe>")
         return
-    raw = context.args[0]
+    symbol = normalize_symbol_for_exchange(context.args[0])
     timeframe = context.args[1] if len(context.args) > 1 else "1m"
-    symbol = normalize_symbol_for_exchange(raw)
     try:
         df = await ccxt_ohlcv(symbol, timeframe=timeframe, limit=50)
         last = df.iloc[-1]
-        text = (
-            f"OHLCV ({symbol}, {timeframe}) - נר אחרון:\n"
-            f"פתיחה: {last['open']}\n"
-            f"גבוה: {last['high']}\n"
-            f"נמוך: {last['low']}\n"
-            f"סגירה: {last['close']}\n"
-            f"מחזור: {last['volume']}\n"
-            f"זמן: {fmt_ts(last['dt'])}"
-        )
+        text = f"{symbol} {timeframe}\nפתיחה: {last['open']} סגירה: {last['close']}"
         await update.message.reply_text(text)
     except Exception as e:
-        logger.exception("ohlcv_cmd error")
-        await update.message.reply_text(f"שגיאה בקבלת OHLCV ל-{symbol}: {e}")
+        await update.message.reply_text(f"שגיאה: {e}")
 
 async def indicators_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("שימוש: /indicators <symbol>\nדוגמה: /indicators BTCUSDT")
+        await update.message.reply_text("שימוש: /indicators <symbol>")
         return
-    raw = context.args[0]
-    symbol = normalize_symbol_for_exchange(raw)
-    try:
-        df = await ccxt_ohlcv(symbol, timeframe="1m", limit=200)
-        closes = df["close"]
-        sma20 = sma(closes, 20).iloc[-1]
-        sma50 = sma(closes, 50).iloc[-1]
-        rsi14 = rsi(closes, 14).iloc[-1]
-        last_close = closes.iloc[-1]
-        ts = df["dt"].iloc[-1]
-        sigs = []
-        if last_close > sma20 and last_close > sma50:
-            sigs.append("מחיר מעל SMA20/50")
-        if rsi14 > 70:
-            sigs.append("RSI גבוה (מעל 70)")
-        elif rsi14 < 30:
-            sigs.append("RSI נמוך (מתחת 30)")
-        if not sigs:
-            sigs.append("אין אות ברור לפי אינדיקטורים בסיסיים")
-        text = (
-            f"({symbol}) אינדיקטורים בסיסיים להמחשה בלבד:\n"
-            f"מחיר: {last_close:.4f}\n"
-            f"SMA20: {sma20:.4f} | SMA50: {sma50:.4f}\n"
-            f"RSI14: {rsi14:.2f}\n"
-            f"סיכום: {', '.join(sigs)}\n"
-            f"זמן: {fmt_ts(ts)}\n"
-            f"המידע אינו ייעוץ או המלצה."
-        )
-        await update.message.reply_text(text)
-    except Exception as e:
-        logger.exception("indicators_cmd error")
-        await update.message.reply_text(f"שגיאה בחישוב אינדיקטורים ל-{symbol}: {e}")
+    symbol = normalize_symbol_for_exchange(context.args[0])
+    df = await ccxt_ohlcv(symbol, timeframe="1m", limit=200)
+    closes = df["close"]
+    sma20 = sma(closes, 20).iloc[-1]
+    rsi14 = rsi(closes, 14).iloc[-1]
+    await update.message.reply_text(f"{symbol}\nSMA20: {sma20:.2f}\nRSI14: {rsi14:.2f}")
 
 async def correlate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
-        await update.message.reply_text("שימוש: /correlate <symbol1> <symbol2> [symbol3 ...]\nדוגמה: /correlate BTCUSD DXY CL=F")
+        await update.message.reply_text("שימוש: /correlate <symbol1> <symbol2>")
         return
-    symbols = context.args
-    try:
-        corr, ts = compute_correlation(symbols, lookback_days=30, interval="60m")
-        if corr is None:
-            await update.message.reply_text("לא הצלחתי לטעון נתונים לקורולציה. נסה סימולים אחרים.")
-            return
-        lines = []
-        header = "קורולציות (תשואות, חלון ~30 ימים, אינטרוול 60m):"
-        lines.append(header)
-        for i in corr.index:
-            row_vals = [f"{corr.loc[i,j]:.2f}" for j in corr.columns]
-            lines.append(f"{i}: " + " | ".join(row_vals))
-        footer = f"עדכון אחרון: {fmt_ts(ts)}" if ts else ""
-        await update.message.reply_text("\n".join(lines + [footer]))
-    except Exception as e:
-        logger.exception("correlate_cmd error")
-        await update.message.reply_text(f"שגיאה בחישוב קורולציה: {e}")
+    corr, ts = compute_correlation(context.args)
+    if corr is None:
+        await update.message.reply_text("אין נתונים.")
+        return
+    lines = [f"{i}: " + " | ".join(f"{corr.loc[i,j]:.2f}" for j in corr.columns) for i in corr.index]
+    await update.message.reply_text("\n".join(lines))
 
 # ---------- Bot init ----------
 def build_application() -> Application:
@@ -269,28 +208,7 @@ def build_application() -> Application:
 # ---------- FastAPI lifecycle ----------
 @app.on_event("startup")
 async def on_startup():
-    global application, bot_task
-    logger.info("Starting FastAPI and Telegram bot (polling)...")
+    global application
     application = build_application()
-    # run_polling blocks, so run it as background task
-    bot_task = asyncio.create_task(application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False
-    ))
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    global application, bot_task
-    logger.info("Shutting down bot...")
-    try:
-        if application:
-            await application.stop()
-        if bot_task:
-            bot_task.cancel()
-    except Exception as e:
-        logger.warning(f"Shutdown issue: {e}")
-
-# ---------- Health ----------
-@app.get("/health")
-async def health():
-    return JSONResponse({"status": "ok", "time": fmt_ts(datetime.now(timezone.utc))})
+    # קובע webhook מול טלגרם
+    await application.bot.set_web
