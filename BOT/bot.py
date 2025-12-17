@@ -20,6 +20,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-domain.example.com
 DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "binance")
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")  # optional: Telegram numeric user id for admin-only ops
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in environment")
@@ -132,6 +133,15 @@ def compute_correlation(symbols: list[str], lookback_days: int = 30, interval: s
     returns = aligned.pct_change().dropna()
     corr = returns.corr()
     return corr, aligned.index[-1] if not aligned.empty else None
+
+# ---------- Admin helper ----------
+def is_admin(update: Update) -> bool:
+    try:
+        if ADMIN_USER_ID:
+            return str(update.effective_user.id) == str(ADMIN_USER_ID)
+    except Exception:
+        pass
+    return False
 
 # ---------- Telegram command handlers ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,13 +285,25 @@ async def on_startup():
     logger.info("Starting application in webhook mode...")
     application = build_application()
     webhook_endpoint = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
-    # set webhook on telegram
+    # remove any existing webhook first to avoid conflicts
     try:
-        await application.bot.set_webhook(url=webhook_endpoint)
-        logger.info(f"Webhook set to {webhook_endpoint}")
+        await application.bot.delete_webhook()
+        logger.info("Deleted existing webhook (if any)")
     except Exception as e:
-        logger.exception(f"Failed to set webhook: {e}")
-        # continue startup; Telegram may block until reachable
+        logger.debug(f"delete_webhook non-fatal: {e}")
+    # set webhook on telegram with retries
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            await application.bot.set_webhook(url=webhook_endpoint)
+            logger.info(f"Webhook set to {webhook_endpoint}")
+            break
+        except Exception as e:
+            logger.warning(f"Attempt {attempt} to set webhook failed: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                logger.exception("Failed to set webhook after retries")
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -302,7 +324,6 @@ async def telegram_webhook(request: Request):
     body = await request.json()
     try:
         update = Update.de_json(body, application.bot)
-        # enqueue update for processing by the Application
         await application.update_queue.put(update)
         return JSONResponse({"ok": True})
     except Exception as e:
