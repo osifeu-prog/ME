@@ -3,33 +3,39 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
-from dotenv import load_dotenv
-load_dotenv()
-
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import ccxt
 
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ---------- Logging ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("trade-bot")
-
-# ---------- Config ----------
+# ---------- Env ----------
+load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "binance")
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in environment")
 
-# ---------- Helpers ----------
+# ---------- Logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("railway-trade-bot")
+
+# ---------- FastAPI ----------
+app = FastAPI(title="Trade Bot Service")
+bot_task: asyncio.Task | None = None
+application: Application | None = None
+
+# ---------- Utils ----------
 def fmt_ts(ts: datetime) -> str:
     return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -39,13 +45,19 @@ def safe_float(x):
     except Exception:
         return None
 
-def to_pct(x):
-    return f"{x*100:.2f}%"
+def normalize_symbol_for_exchange(symbol: str) -> str:
+    s = symbol.upper().replace("-", "").replace("_", "")
+    if "/" in symbol:
+        return symbol.upper()
+    if s.endswith("USDT"):
+        return s[:-4] + "/USDT"
+    if s.endswith("USD"):
+        return s[:-3] + "/USD"
+    return symbol.upper()
 
-# Map symbols for yfinance (for correlation and non-crypto):
 YF_SYMBOL_MAP = {
-    "DXY": "DX-Y.NYB",    # US Dollar Index (approx proxy)
-    "CL": "CL=F",         # Crude Oil Futures
+    "DXY": "DX-Y.NYB",
+    "CL": "CL=F",
     "WTI": "CL=F",
     "BRENT": "BZ=F",
     "GOLD": "GC=F",
@@ -54,19 +66,15 @@ YF_SYMBOL_MAP = {
     "BTCUSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
 }
-
 def resolve_symbol(symbol: str) -> str:
     s = symbol.upper()
     return YF_SYMBOL_MAP.get(s, symbol)
 
-# ---------- Market data via CCXT ----------
+# ---------- CCXT ----------
 def get_exchange(name: str = DEFAULT_EXCHANGE):
     try:
         ex_class = getattr(ccxt, name)
-        ex = ex_class({
-            "enableRateLimit": True,
-            "timeout": 10000,
-        })
+        ex = ex_class({"enableRateLimit": True, "timeout": 10000})
         return ex
     except Exception as e:
         logger.exception("Exchange init failed")
@@ -75,7 +83,6 @@ def get_exchange(name: str = DEFAULT_EXCHANGE):
 async def ccxt_ticker(symbol: str, exchange_name: str = DEFAULT_EXCHANGE):
     loop = asyncio.get_event_loop()
     ex = get_exchange(exchange_name)
-    # CCXT is sync; run in thread
     def _fetch():
         return ex.fetch_ticker(symbol)
     return await loop.run_in_executor(None, _fetch)
@@ -108,7 +115,6 @@ def compute_correlation(symbols: list[str], lookback_days: int = 30, interval: s
     data = {}
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
-
     for s in symbols:
         yf_symbol = resolve_symbol(s)
         try:
@@ -118,40 +124,29 @@ def compute_correlation(symbols: list[str], lookback_days: int = 30, interval: s
             data[s] = df["Close"].rename(s)
         except Exception as e:
             logger.warning(f"Failed to load {s}: {e}")
-
     if not data:
         return None, None
-
     aligned = pd.concat(data.values(), axis=1).dropna()
     returns = aligned.pct_change().dropna()
     corr = returns.corr()
     return corr, aligned.index[-1] if not aligned.empty else None
 
-# ---------- Command Handlers ----------
+# ---------- Telegram Handlers ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "ברוך הבא לבוט נתוני שוק.\n\n"
-        "פקודות זמינות:\n"
-        "/price <symbol> - מחיר אחרון מהבורסה (למשל BTC/USDT או BTCUSDT)\n"
-        "/ohlcv <symbol> <timeframe> - נתוני נרות בסיסיים (ברירת מחדל 1m)\n"
-        "/indicators <symbol> - SMA/RSI בסיסי להמחשה\n"
-        "/correlate <symbols...> - קורולציות בין נכסים (למשל BTCUSD DXY CL=F)\n"
-        "/help - עזרה\n\n"
-        "הערה: המידע מוצג לצורכי מידע בלבד, לא המלצה או ייעוץ מסחר."
+        "פקודות:\n"
+        "/price <symbol> — מחיר אחרון (למשל BTCUSDT)\n"
+        "/ohlcv <symbol> <timeframe> — נר אחרון (ברירת מחדל 1m)\n"
+        "/indicators <symbol> — SMA/RSI בסיסי\n"
+        "/correlate <symbols...> — קורולציות (למשל BTCUSD DXY CL=F)\n"
+        "/help — עזרה\n\n"
+        "המידע לצורכי אינפורמציה בלבד, לא ייעוץ או המלצה."
     )
     await update.message.reply_text(text)
 
-def normalize_symbol_for_exchange(symbol: str) -> str:
-    s = symbol.upper().replace("-", "").replace("_", "")
-    # Common crypto pairs
-    if "/" in symbol:
-        return symbol.upper()
-    if s.endswith("USDT"):
-        return s[:-4] + "/USDT"
-    if s.endswith("USD"):
-        return s[:-3] + "/USD"
-    # Fallback: assume user provided with slash already or raw
-    return symbol.upper()
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_cmd(update, context)
 
 async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -215,8 +210,6 @@ async def indicators_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rsi14 = rsi(closes, 14).iloc[-1]
         last_close = closes.iloc[-1]
         ts = df["dt"].iloc[-1]
-
-        # Illustration-only signal summary (NOT advice)
         sigs = []
         if last_close > sma20 and last_close > sma50:
             sigs.append("מחיר מעל SMA20/50")
@@ -226,7 +219,6 @@ async def indicators_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sigs.append("RSI נמוך (מתחת 30)")
         if not sigs:
             sigs.append("אין אות ברור לפי אינדיקטורים בסיסיים")
-
         text = (
             f"({symbol}) אינדיקטורים בסיסיים להמחשה בלבד:\n"
             f"מחיר: {last_close:.4f}\n"
@@ -251,7 +243,6 @@ async def correlate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if corr is None:
             await update.message.reply_text("לא הצלחתי לטעון נתונים לקורולציה. נסה סימולים אחרים.")
             return
-        # Build a compact text table
         lines = []
         header = "קורולציות (תשואות, חלון ~30 ימים, אינטרוול 60m):"
         lines.append(header)
@@ -264,22 +255,42 @@ async def correlate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("correlate_cmd error")
         await update.message.reply_text(f"שגיאה בחישוב קורולציה: {e}")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_cmd(update, context)
+# ---------- Bot init ----------
+def build_application() -> Application:
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("price", price_cmd))
+    app.add_handler(CommandHandler("ohlcv", ohlcv_cmd))
+    app.add_handler(CommandHandler("indicators", indicators_cmd))
+    app.add_handler(CommandHandler("correlate", correlate_cmd))
+    return app
 
-# ---------- Main ----------
-def main():
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+# ---------- FastAPI lifecycle ----------
+@app.on_event("startup")
+async def on_startup():
+    global application, bot_task
+    logger.info("Starting FastAPI and Telegram bot (polling)...")
+    application = build_application()
+    # run_polling blocks, so run it as background task
+    bot_task = asyncio.create_task(application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        close_loop=False
+    ))
 
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("price", price_cmd))
-    application.add_handler(CommandHandler("ohlcv", ohlcv_cmd))
-    application.add_handler(CommandHandler("indicators", indicators_cmd))
-    application.add_handler(CommandHandler("correlate", correlate_cmd))
+@app.on_event("shutdown")
+async def on_shutdown():
+    global application, bot_task
+    logger.info("Shutting down bot...")
+    try:
+        if application:
+            await application.stop()
+        if bot_task:
+            bot_task.cancel()
+    except Exception as e:
+        logger.warning(f"Shutdown issue: {e}")
 
-    logger.info("Bot is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+# ---------- Health ----------
+@app.get("/health")
+async def health():
+    return JSONResponse({"status": "ok", "time": fmt_ts(datetime.now(timezone.utc))})
