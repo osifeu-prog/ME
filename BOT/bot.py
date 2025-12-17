@@ -287,24 +287,29 @@ async def on_startup():
     logger.info("Startup: building Telegram Application (webhook mode)...")
     application = build_application()
     webhook_endpoint = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_BOT_TOKEN}"
+    logger.info("Computed webhook_endpoint=%s", webhook_endpoint)
+
+    # log envs
+    logger.info("ENV TELEGRAM_BOT_TOKEN present=%s", bool(TELEGRAM_BOT_TOKEN))
+    logger.info("ENV WEBHOOK_URL present=%s", bool(WEBHOOK_URL))
+    logger.info("DEFAULT_EXCHANGE=%s", DEFAULT_EXCHANGE)
 
     # try to delete existing webhook (non-fatal)
     try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Deleted existing webhook (if any)")
+        del_resp = await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("delete_webhook response: %s", del_resp)
     except Exception as e:
-        logger.debug("delete_webhook non-fatal: %s", e)
+        logger.warning("delete_webhook failed (non-fatal): %s", e)
 
     # attempt to set webhook with retries and logging of responses
-    max_retries = 5
+    max_retries = 6
     for attempt in range(1, max_retries + 1):
         try:
             resp = await application.bot.set_webhook(url=webhook_endpoint)
-            logger.info("set_webhook response: %s", resp)
+            logger.info("set_webhook response (raw): %s", resp)
             # verify via getWebhookInfo
             try:
                 info = await application.bot.get_webhook_info()
-                # info may be a telegram.WebhookInfo object; convert to dict if possible
                 try:
                     info_dict = info.to_dict()
                 except Exception:
@@ -313,13 +318,16 @@ async def on_startup():
             except Exception as e:
                 logger.warning("get_webhook_info check failed: %s", e)
             _ready = True
+            logger.info("Webhook set and verified, readiness=true")
             break
         except Exception as e:
-            logger.warning("Attempt %d to set webhook failed: %s", attempt, e)
+            logger.exception("Attempt %d to set webhook failed", attempt)
             if attempt < max_retries:
-                await asyncio.sleep(2 ** attempt)
+                sleep_for = min(30, 2 ** attempt)
+                logger.info("Sleeping %s seconds before retry", sleep_for)
+                await asyncio.sleep(sleep_for)
             else:
-                logger.exception("Failed to set webhook after retries")
+                logger.error("Failed to set webhook after %d attempts", max_retries)
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -346,7 +354,7 @@ async def telegram_webhook(request: Request):
         logger.exception("Failed to process incoming update")
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-# ---------- Debug endpoints (safe for admin use) ----------
+# ---------- Debug endpoints (admin-safe) ----------
 @app.get("/debug/webhookInfo")
 async def debug_webhook_info():
     if application is None:
@@ -382,6 +390,18 @@ async def debug_set_webhook_manual():
         return JSONResponse({"ok": True, "set_response": resp, "webhook_info": info_dict})
     except Exception as e:
         logger.exception("Manual set_webhook failed")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/debug/deleteWebhookManual")
+async def debug_delete_webhook_manual():
+    if application is None:
+        return JSONResponse({"ok": False, "error": "application not ready"}, status_code=503)
+    try:
+        resp = await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Manual delete_webhook response: %s", resp)
+        return JSONResponse({"ok": True, "delete_response": resp})
+    except Exception as e:
+        logger.exception("Manual delete_webhook failed")
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 # ---------- Health ----------
