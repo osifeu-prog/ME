@@ -1,32 +1,38 @@
-# Dockerfile for Railway — reliable install and runtime
-FROM python:3.11-slim
+# Stage 1: build stage — התקנת תלויות ובניית חבילות
+FROM python:3.11-slim AS build
 
-# Basic env
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Copy requirements early to leverage Docker cache
+# העתק קובץ הדרישות בלבד כדי לנצל cache של Docker
 COPY requirements.txt /app/requirements.txt
 
-# Install system deps, upgrade pip, install gunicorn and requirements
+# התקנת כלי בנייה נחוצים, שדרוג pip והתקנת חבילות לתיקיית /install
 RUN apt-get update \
   && apt-get install -y --no-install-recommends build-essential gcc libffi-dev libssl-dev ca-certificates \
   && python -m pip install --upgrade pip setuptools wheel \
-  && python -m pip install --no-cache-dir gunicorn==20.1.0 \
-  && python -m pip install --no-cache-dir -r /app/requirements.txt \
-  && apt-get remove -y build-essential gcc \
-  && apt-get autoremove -y \
+  && python -m pip install --prefix=/install --no-cache-dir -r /app/requirements.txt \
   && rm -rf /var/lib/apt/lists/*
 
-# Copy application code
+# Stage 2: runtime stage — תמונה נקייה להרצה
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# העתק את החבילות שהותקנו מהשלב הקודם למערכת
+COPY --from=build /install /usr/local
+
+# העתק את שאר קבצי האפליקציה
 COPY . /app
 
-# Ensure user-base bin is in PATH in case pip used user install
-ENV PATH="/root/.local/bin:${PATH}"
+# ודא ש‑/usr/local/bin ב‑PATH; זה המקום שבו pip עם --prefix מתקין בינארים
+ENV PATH="/usr/local/bin:${PATH}"
 
-# Default PORT for local testing; Railway will override with its env
+# ברירת מחדל לפורט לבדיקה מקומית; Railway יספק PORT בזמן ריצה
 ENV PORT=8080
 
-# Use shell form so $PORT is expanded by sh when Railway runs the container
+# השתמש ב‑sh -c כדי לאפשר הרחבת $PORT בזמן הריצה
 CMD sh -c "python -m gunicorn --bind 0.0.0.0:${PORT} bot:app --workers 2 --timeout 30"
