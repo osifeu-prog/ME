@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    container_name: telegram_app
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+    networks:
+      - webnet
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: telegram_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/www/certbot
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - app
+    networks:
+      - webnet
+
+  certbot:
+    image: certbot/certbot
+    container_name: telegram_certbot
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 12h & wait $${!}; certbot renew --webroot -w /var/www/certbot --quiet && nginx -s reload || true; done'"
+
+volumes:
+  certbot-etc:
+  certbot-var:
+
+networks:
+  webnet:
+    driver: bridge
