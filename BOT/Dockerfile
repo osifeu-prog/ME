@@ -1,8 +1,16 @@
 FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot.py .
-ENV PYTHONUNBUFFERED=1
-CMD ["uvicorn", "bot:app", "--host", "0.0.0.0", "--port", "8000"]
+
+COPY . .
+
+# פורט פנימי שה‑Gunicorn מאזין אליו
+ENV PORT=8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app", "--workers", "3", "--timeout", "120"]
