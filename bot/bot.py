@@ -1,18 +1,17 @@
-import os
 import logging
 import json
 from flask import Flask, request, jsonify
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os
 
-# הגדרת לוגר
+# הגדרת לוגר מפורט
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG  # שיניתי ל-DEBUG כדי לקבל יותר פרטים
 )
 logger = logging.getLogger(__name__)
 
-# אתחול Flask app
 app = Flask(__name__)
 
 # קבלת משתני סביבה
@@ -20,20 +19,31 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
 ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID')
-PORT = int(os.environ.get('PORT', 8080))
 
-# בדיקה שהמשתנים הנדרשים קיימים
+# בדיקת משתנים
+logger.info(f"TELEGRAM_TOKEN: {'נמצא' if TELEGRAM_TOKEN else 'לא נמצא'}")
+logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
+logger.info(f"WEBHOOK_SECRET: {'נמצא' if WEBHOOK_SECRET else 'לא נמצא'}")
+
 if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN לא הוגדר!")
     raise ValueError("TELEGRAM_BOT_TOKEN לא הוגדר")
+
 if not WEBHOOK_URL:
+    logger.error("WEBHOOK_URL לא הוגדר!")
     raise ValueError("WEBHOOK_URL לא הוגדר")
 
 # אתחול ה-Application של טלגרם
-application = Application.builder().token(TELECGRAM_TOKEN).build()
+try:
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    logger.info("יישום טלגרם אותחל בהצלחה")
+except Exception as e:
+    logger.error(f"שגיאה באתחול יישום טלגרם: {e}")
+    raise
 
 # הגדרת handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """שולח הודעה כשהמשתמש מפעיל /start"""
+    logger.info(f"פקודת /start מ-{update.effective_user.id}")
     user = update.effective_user
     await update.message.reply_text(
         f"שלום {user.first_name}!\n"
@@ -41,141 +51,89 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"הבוט פעיל ומוכן!"
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """שולח הודעת עזרה"""
-    help_text = """
-    פקודות זמינות:
-    /start - התחל שיחה
-    /help - הצג הודעת עזרה
-    /id - הצג את ה-ID שלך
-    /admin - פקודות מנהל (למנהל בלבד)
-    """
-    await update.message.reply_text(help_text)
-
-async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מציג את ה-ID של המשתמש"""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    await update.message.reply_text(
-        f"👤 User ID: {user_id}\n"
-        f"💬 Chat ID: {chat_id}"
-    )
-
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """פקודות מנהל"""
-    user_id = update.effective_user.id
-    
-    if str(user_id) != ADMIN_USER_ID:
-        await update.message.reply_text("⚠️ גישה נדחית - אתה לא מנהל!")
-        return
-    
-    await update.message.reply_text(
-        "👑 פקודות מנהל:\n"
-        "/stats - סטטיסטיקות\n"
-        "/broadcast - שליחת הודעה לכולם"
-    )
-
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מחזיר את ההודעה שהמשתמש שלח"""
     text = update.message.text
+    logger.info(f"הודעה מ-{update.effective_user.id}: {text}")
     await update.message.reply_text(f"קיבלתי: {text}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """טיפול בשגיאות"""
-    logger.error(f"שגיאה: {context.error}")
+    logger.error(f"שגיאה: {context.error}", exc_info=True)
 
 # הוספת ה-handlers
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("id", show_id))
-application.add_handler(CommandHandler("admin", admin_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 application.add_error_handler(error_handler)
 
-# נתיבים של Flask
 @app.route('/')
 def home():
-    return jsonify({
-        "status": "online",
-        "service": "telegram-bot",
-        "webhook_set": application.bot.get_webhook_info().url == WEBHOOK_URL
-    })
+    return jsonify({"status": "online", "service": "telegram-bot"})
+
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "healthy"})
 
 @app.route('/webhook', methods=['POST'])
 async def webhook():
-    """נקודת הכניסה ל-webhook מטלגרם"""
-    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != WEBHOOK_SECRET:
+    logger.info("📨 התקבלה בקשה ל-/webhook")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
+    secret_from_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    
+    if secret_from_header != WEBHOOK_SECRET:
+        logger.warning(f"סוד לא תואם! מהכותרת: {secret_from_header}, מצופה: {WEBHOOK_SECRET}")
         return 'Unauthorized', 403
     
     try:
         data = request.get_json()
+        logger.info(f"נתונים שהתקבלו: {json.dumps(data)}")
+        
         update = Update.de_json(data, application.bot)
+        
         await application.initialize()
         await application.process_update(update)
+        
+        logger.info("✅ עדכון טופל בהצלחה")
         return 'OK'
     except Exception as e:
-        logger.error(f"Error processing update: {e}")
+        logger.error(f"שגיאה בעיבוד עדכון: {e}", exc_info=True)
         return 'Error', 500
 
-@app.route('/set_webhook', methods=['GET', 'POST'])
-def set_webhook():
-    """מגדיר את ה-webhook בשרת טלגרם"""
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook_route():
     try:
-        # הגדרת webhook
-        webhook_info = application.bot.set_webhook(
+        result = application.bot.set_webhook(
             url=WEBHOOK_URL,
             secret_token=WEBHOOK_SECRET,
             max_connections=40
         )
         
-        # בדיקת סטטוס
         info = application.bot.get_webhook_info()
+        logger.info(f"Webhook הוגדר: {info.url}")
         
         return jsonify({
             "success": True,
             "webhook_url": info.url,
-            "has_custom_certificate": info.has_custom_certificate,
-            "pending_update_count": info.pending_update_count,
-            "max_connections": info.max_connections,
-            "ip_address": info.ip_address
+            "pending_update_count": info.pending_update_count
         })
     except Exception as e:
+        logger.error(f"שגיאה בהגדרת webhook: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/health')
-def health_check():
-    """בדיקת בריאות"""
-    return jsonify({"status": "healthy", "service": "telegram-bot"})
+# אתחול webhook בעת טעינת האפליקציה
+@app.before_first_request
+def initialize_webhook():
+    logger.info("מנסה להגדיר webhook באתחול...")
+    try:
+        # נסה להגדיר webhook
+        application.bot.set_webhook(
+            url=WEBHOOK_URL,
+            secret_token=WEBHOOK_SECRET,
+            max_connections=40
+        )
+        logger.info(f"Webhook הוגדר בהצלחה ל-{WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"לא הצלחתי להגדיר webhook באתחול: {e}")
 
-# פונקציה לאתחול
-async def initialize():
-    """אתחול האפליקציה"""
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()  # לגיבוי, אם ה-webhook לא עובד
-
-# הרצה
 if __name__ == '__main__':
-    # במצב פיתוח - הרץ עם polling
-    import asyncio
-    asyncio.run(initialize())
-    app.run(host='0.0.0.0', port=PORT, debug=False)
-else:
-    # ב-production דרך gunicorn
-    # מגדיר את ה-webhook בעת טעינת המודול
-    import asyncio
-    
-    async def setup_webhook():
-        try:
-            await application.initialize()
-            await application.bot.set_webhook(
-                url=WEBHOOK_URL,
-                secret_token=WEBHOOK_SECRET,
-                max_connections=40
-            )
-            logger.info(f"Webhook set to: {WEBHOOK_URL}")
-        except Exception as e:
-            logger.error(f"Failed to set webhook: {e}")
-    
-    # הרץ את הגדרת ה-webhook
-    asyncio.run(setup_webhook())
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
