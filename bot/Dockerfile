@@ -4,18 +4,21 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
+# העתק את requirements לפני התקנת חבילות כדי לנצל cache של Docker
 COPY requirements.txt /app/requirements.txt
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc libffi-dev libssl-dev ca-certificates \
+
+# התקנת תלויות מערכת נחוצות, עדכון pip והתקנת חבילות (כולל gunicorn)
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends build-essential gcc libffi-dev libssl-dev ca-certificates \
   && python -m pip install --upgrade pip setuptools wheel \
-  && pip install --no-cache-dir -r /app/requirements.txt \
+  && python -m pip install --no-cache-dir gunicorn==20.1.0 \
+  && python -m pip install --no-cache-dir -r /app/requirements.txt \
   && apt-get remove -y build-essential gcc \
   && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
+# העתק שאר הקוד
 COPY . /app
 
-ENV PORT=8080
-
-# Use shell form so $PORT is expanded at container start
-CMD sh -c "gunicorn --bind 0.0.0.0:$PORT bot:app --workers 2 --timeout 30"
+# אם pip בכל זאת התקין חבילות ל־~/.local, ודא שהבינארים שם זמינים ב‑PATH
+ENV PATH
