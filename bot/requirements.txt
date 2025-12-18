@@ -1,2 +1,2 @@
-python-telegram-bot==13.7  # גרסה ישנה יותר - עובדת עם Flask ללא async
+python-telegram-bot==13.7
 Flask==2.3.3
