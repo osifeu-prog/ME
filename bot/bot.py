@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # bot.py
 # Flask WSGI app for Telegram webhook. Designed for Railway / similar hosts.
-# Requirements: Flask, pyTelegramBotAPI
+# Requirements: Flask, pyTelegramBotAPI, requests
 # Recommended start command: gunicorn --bind 0.0.0.0:$PORT bot:app --workers 2
 
 import os
@@ -10,6 +10,7 @@ import threading
 import logging
 from flask import Flask, request, abort, jsonify
 import telebot
+import requests
 
 # --- Configuration from environment ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -17,6 +18,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://me-production-8bf5.up.rai
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_this_secret")
 AUTO_SET_WEBHOOK = os.getenv("AUTO_SET_WEBHOOK", "false").lower() in ("1", "true", "yes")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is required")
@@ -33,15 +35,14 @@ bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 @bot.message_handler(func=lambda m: True)
 def handle_all_messages(message):
     try:
-        # Simple echo behavior; replace with your logic
         if message.text:
             reply = f"קיבלתי: {message.text}"
         else:
             reply = "קיבלתי את ההודעה שלך — תודה!"
         bot.send_message(message.chat.id, reply)
-        logger.info("Replied to chat_id=%s message_id=%s", message.chat.id, getattr(message, "message_id", None))
-    except Exception as e:
-        logger.exception("Failed to reply to message: %s", e)
+        logger.info("Replied to chat_id=%s message_id=%s", getattr(message.chat, "id", None), getattr(message, "message_id", None))
+    except Exception:
+        logger.exception("Failed to reply to message")
 
 # --- Webhook endpoint ---
 @app.route("/webhook/<secret>", methods=["POST"])
@@ -58,8 +59,8 @@ def webhook(secret):
         logger.debug("RAW UPDATE: %s", raw)
         update = request.get_json(force=True)
         bot.process_new_updates([telebot.types.Update.de_json(update)])
-    except Exception as e:
-        logger.exception("Error processing update: %s", e)
+    except Exception:
+        logger.exception("Error processing update")
         # Return 200 to avoid Telegram retry storms for transient errors,
         # but log the exception for investigation.
         return "OK", 200
@@ -84,22 +85,39 @@ def set_webhook():
     try:
         # Remove existing webhook first (best-effort)
         try:
-            bot.remove_webhook()
+            r = requests.get(f"{TELEGRAM_API_BASE}/deleteWebhook", timeout=10)
+            logger.debug("deleteWebhook response: %s", r.text)
         except Exception:
-            # ignore remove errors
-            pass
-        result = bot.set_webhook(url=webhook_url)
-        logger.info("set_webhook result=%s url=%s", result, webhook_url)
-        return True
-    except Exception as e:
-        logger.exception("Failed to set webhook: %s", e)
+            logger.debug("deleteWebhook request failed (ignored)")
+        r = requests.post(f"{TELEGRAM_API_BASE}/setWebhook", data={"url": webhook_url}, timeout=10)
+        logger.info("set_webhook response: %s", r.text)
+        return r.ok and r.json().get("ok", False)
+    except Exception:
+        logger.exception("Failed to set webhook")
         return False
+
+def delete_webhook():
+    try:
+        r = requests.get(f"{TELEGRAM_API_BASE}/deleteWebhook", timeout=10)
+        logger.info("delete_webhook response: %s", r.text)
+        return r.ok and r.json().get("ok", False)
+    except Exception:
+        logger.exception("Failed to delete webhook")
+        return False
+
+def get_webhook_info():
+    try:
+        r = requests.get(f"{TELEGRAM_API_BASE}/getWebhookInfo", timeout=10)
+        logger.debug("getWebhookInfo response: %s", r.text)
+        return r.json() if r.ok else None
+    except Exception:
+        logger.exception("Failed to get webhook info")
+        return None
 
 def maybe_auto_set_webhook_background():
     """If AUTO_SET_WEBHOOK is enabled, set webhook in a background thread."""
     if AUTO_SET_WEBHOOK and WEBHOOK_URL:
         def worker():
-            # small delay to allow the process to be fully ready
             time.sleep(1)
             success = set_webhook()
             if not success:
@@ -107,7 +125,7 @@ def maybe_auto_set_webhook_background():
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-# Optional admin endpoint to trigger set_webhook (protected by WEBHOOK_SECRET)
+# Optional admin endpoints (protected by WEBHOOK_SECRET)
 @app.route("/admin/set_webhook/<secret>", methods=["POST"])
 def admin_set_webhook(secret):
     if secret != WEBHOOK_SECRET:
@@ -115,12 +133,24 @@ def admin_set_webhook(secret):
     ok = set_webhook()
     return jsonify(result=ok), (200 if ok else 500)
 
+@app.route("/admin/delete_webhook/<secret>", methods=["POST"])
+def admin_delete_webhook(secret):
+    if secret != WEBHOOK_SECRET:
+        abort(403)
+    ok = delete_webhook()
+    return jsonify(result=ok), (200 if ok else 500)
+
+@app.route("/admin/get_webhook_info/<secret>", methods=["GET"])
+def admin_get_webhook_info(secret):
+    if secret != WEBHOOK_SECRET:
+        abort(403)
+    info = get_webhook_info()
+    return jsonify(result=info), (200 if info is not None else 500)
+
 # --- Startup behavior ---
-# When imported by gunicorn, this module-level code runs once.
 maybe_auto_set_webhook_background()
 
 # --- Local run support ---
 if __name__ == "__main__":
-    # For local testing only. In production use gunicorn as recommended.
     maybe_auto_set_webhook_background()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
