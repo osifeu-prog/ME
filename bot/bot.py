@@ -2,89 +2,83 @@ import os
 import logging
 import json
 import asyncio
+from threading import Thread
 from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# הגדרת לוגר
+# ==================== הגדרת לוגר ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# אתחול Flask app
+# ==================== אתחול Flask ====================
 app = Flask(__name__)
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
-# קבלת משתני סביבה
+# ==================== קבלת משתני סביבה ====================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
 ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID')
 PORT = int(os.environ.get('PORT', 8080))
 
-# בדיקה שהמשתנים הנדרשים קיימים
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN לא הוגדר")
-if not WEBHOOK_URL:
-    raise ValueError("WEBHOOK_URL לא הוגדר")
-
-# אתחול ה-Application של טלגרם
+# ==================== אתחול אפליקציית הטלגרם ====================
+# ניצור את האובייקט אבל לא נייצר לולאה כאן
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# הגדרת handlers
+# ==================== הגדרת פונקציות הבוט ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """שולח הודעה כשהמשתמש מפעיל /start"""
     user = update.effective_user
     await update.message.reply_text(
-        f"שלום {user.first_name}!\n"
-        f"ה-ID שלך הוא: {user.id}\n"
-        f"הבוט פעיל ומוכן!"
+        f"שלום {user.first_name}! 👋\n"
+        f"ה-ID שלך הוא: `{user.id}`\n"
+        f"הבוט פעיל ומוכן!",
+        parse_mode='Markdown'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """שולח הודעת עזרה"""
     help_text = """
-    פקודות זמינות:
-    /start - התחל שיחה
-    /help - הצג הודעת עזרה
-    /id - הצג את ה-ID שלך
-    /admin - פקודות מנהל (למנהל בלבד)
+📚 *פקודות זמינות:*
+/start - התחל שיחה
+/help - הצג הודעת עזרה זו
+/id - הצג את ה-ID שלך
+/admin - פקודות מנהל (למנהל בלבד)
+
+שלח לי כל הודעה ואני אחזור עליה!
     """
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מציג את ה-ID של המשתמש"""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     await update.message.reply_text(
-        f"👤 User ID: {user_id}\n"
-        f"💬 Chat ID: {chat_id}"
+        f"👤 *User ID:* `{user_id}`\n"
+        f"💬 *Chat ID:* `{chat_id}`",
+        parse_mode='Markdown'
     )
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """פקודות מנהל"""
-    user_id = update.effective_user.id
-    
-    if str(user_id) != ADMIN_USER_ID:
-        await update.message.reply_text("⚠️ גישה נדחית - אתה לא מנהל!")
+    user_id = str(update.effective_user.id)
+    if ADMIN_USER_ID and user_id != ADMIN_USER_ID:
+        await update.message.reply_text("⚠️ *גישה נדחית* - אתה לא מנהל!", parse_mode='Markdown')
         return
-    
     await update.message.reply_text(
-        "👑 פקודות מנהל:\n"
-        "/stats - סטטיסטיקות\n"
-        "/broadcast - שליחת הודעה לכולם"
+        "👑 *פקודות מנהל:*\n"
+        "/stats - הצג סטטיסטיקות (בפיתוח)\n"
+        "/broadcast - שליחת הודעה לכולם (בפיתוח)",
+        parse_mode='Markdown'
     )
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מחזיר את ההודעה שהמשתמש שלח"""
-    text = update.message.text
-    await update.message.reply_text(f"קיבלתי: {text}")
+    user_text = update.message.text
+    await update.message.reply_text(f"📝 אתה כתבת: *{user_text}*", parse_mode='Markdown')
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """טיפול בשגיאות"""
-    logger.error(f"שגיאה: {context.error}")
+    logger.error(f"שגיאה בטיפול בעדכון: {context.error}", exc_info=True)
+    if update and update.effective_message:
+        await update.effective_message.reply_text("❌ אירעה שגיאה בעיבוד הפקודה.")
 
 # הוספת ה-handlers
 application.add_handler(CommandHandler("start", start))
@@ -94,149 +88,108 @@ application.add_handler(CommandHandler("admin", admin_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 application.add_error_handler(error_handler)
 
-# אתחול האפליקציה של טלגרם
-async def initialize_bot():
-    """אתחול האפליקציה של הטלגרם בוט"""
-    await application.initialize()
-    await application.start()
-    logger.info("בוט טלגרם אותחל בהצלחה")
-
-# הרץ את אתחול הבוט
-try:
+# ==================== אתחול הבוט בלולאה נפרדת ====================
+def run_bot():
+    """ הרצת הבוט בלולאת אירועים נפרדת """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(initialize_bot())
-    logger.info("בוט טלגרם מוכן לקבל עדכונים")
-except Exception as e:
-    logger.error(f"שגיאה באתחול הבוט: {e}")
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    logger.info("✅ בוט טלגרם אותחל בהצלחה")
+    # הפעלת הבוט עד להפסקה
+    loop.run_forever()
 
-# נתיבים של Flask
+# התחלת אתחול הבוט ב-thread נפרד כאשר המודול נטען
+# אך רק אם לא ב-test mode וכו'
+if __name__ != '__main__':
+    # ב-production, הפעל את הבוט ב-thread נפרד
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logger.info("Thread for bot started")
+
+# ==================== נתיבי Flask ====================
 @app.route('/')
 def home():
     return jsonify({
         "status": "online",
         "service": "telegram-bot",
+        "message": "שרת הבוט פועל",
         "webhook_url": WEBHOOK_URL
     })
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """נקודת הכניסה ל-webhook מטלגרם"""
     secret_from_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
     logger.info(f"📨 התקבלה בקשה ל-/webhook")
-    
+
     if secret_from_header != WEBHOOK_SECRET:
-        logger.warning("⚠️ סוד לא תואם! דוחה את הבקשה.")
+        logger.warning("   ⚠️ סוד לא תואם! דוחה את הבקשה.")
         return 'Unauthorized', 403
-    
+
     try:
-        # המרת הנתונים לעדכון של טלגרם
-        update_data = request.get_json()
-        update = Update.de_json(update_data, application.bot)
+        data = request.get_json()
+        if 'message' in data:
+            text = data['message'].get('text', '[ללא טקסט]')
+            logger.info(f"   הודעה: '{text[:50]}...' ממשתמש {data['message']['from'].get('id')}")
         
-        # הוסף את העדכון לתור העיבוד של האפליקציה
-        # שימוש ב-run_until_complete מכיוון שאנחנו בתוך פונקציה סינכרונית
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.process_update(update))
+        update = Update.de_json(data, application.bot)
         
-        logger.info("✅ עדכון טופל בהצלחה")
+        # שולח את העדכון לבוט לעיבוד, אבל לא מחכה לסיום (non-blocking)
+        # נשתמש בלולאה הקיימת של הבוט
+        future = asyncio.run_coroutine_threadsafe(application.process_update(update), application.updater._loop)
+        # אפשר לחכות לתוצאה אם צריך, אבל לא חובה
+        # result = future.result(timeout=10)
+        
+        logger.info("   ✅ עדכון נשלח לעיבוד")
         return 'OK'
     except Exception as e:
-        logger.error(f"❌ שגיאה בעיבוד עדכון: {e}", exc_info=True)
+        logger.error(f"   ❌ שגיאה בעיבוד עדכון: {e}", exc_info=True)
         return 'Error', 500
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
-    """מגדיר את ה-webhook בשרת טלגרם"""
     try:
-        # הגדרת webhook
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(
+        # הגדרת ה-webhook
+        # שימוש בלולאה של הבוט
+        future = asyncio.run_coroutine_threadsafe(
             application.bot.set_webhook(
                 url=WEBHOOK_URL,
                 secret_token=WEBHOOK_SECRET,
                 max_connections=40
-            )
+            ), application.updater._loop
         )
+        future.result(timeout=10)  # מחכים לסיום
         
-        # בדיקת סטטוס
-        info = loop.run_until_complete(application.bot.get_webhook_info())
+        # קבלת מידע על ה-webhook
+        future = asyncio.run_coroutine_threadsafe(application.bot.get_webhook_info(), application.updater._loop)
+        info = future.result(timeout=10)
         
         return jsonify({
             "success": True,
-            "webhook_url": info.url,
-            "has_custom_certificate": info.has_custom_certificate,
-            "pending_update_count": info.pending_update_count,
-            "max_connections": info.max_connections,
-            "ip_address": info.ip_address
+            "message": "Webhook הוגדר בהצלחה",
+            "details": {
+                "url": info.url,
+                "pending_updates": info.pending_update_count,
+                "last_error": info.last_error_message,
+                "ip": info.ip_address
+            }
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/health')
 def health_check():
-    """בדיקת בריאות"""
     return jsonify({"status": "healthy", "service": "telegram-bot"})
 
-@app.route('/test', methods=['POST', 'GET'])
-def test_webhook():
-    """נתיב לבדיקת webhook"""
-    if request.method == 'GET':
-        return jsonify({"message": "Use POST to test webhook"})
-    
-    # מדמה בקשה מטלגרם
-    test_data = {
-        "update_id": 10000,
-        "message": {
-            "message_id": 1,
-            "from": {
-                "id": 123456789,
-                "first_name": "Test",
-                "is_bot": False
-            },
-            "chat": {
-                "id": 123456789,
-                "first_name": "Test",
-                "type": "private"
-            },
-            "date": 1600000000,
-            "text": "/start"
-        }
-    }
-    
-    # שולח את הנתונים לעצמו
-    response = app.test_client().post(
-        '/webhook',
-        json=test_data,
-        headers={'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET}
-    )
-    
-    return jsonify({
-        "status": response.status_code,
-        "data": response.get_json() if response.is_json else response.data.decode()
-    })
-
-# הרצה ישירה לצורך פיתוח
+# ==================== הרצה מקומית ====================
 if __name__ == '__main__':
-    # במצב פיתוח - הגדר webhook
-    async def dev_setup():
-        await application.initialize()
-        await application.start()
-        # הגדר webhook ל-localhost לצורך בדיקה
-        await application.bot.set_webhook(
-            url="https://me-production-8bf5.up.railway.app/webhook",
-            secret_token=WEBHOOK_SECRET,
-            max_connections=40
-        )
-        logger.info("Webhook הוגדר בהצלחה לפתחון")
+    # הרצה מקומית: מריץ את הבוט ואת Flask באותו תהליך (לא מומלץ ל-production)
+    # אבל זה עבור פיתוח ובדיקה
+    logger.info("🚀 מריץ את שרת Flask והבוט בפיתוח מקומי...")
     
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(dev_setup())
-    except Exception as e:
-        logger.error(f"שגיאה בהגדרת webhook לפתחון: {e}")
+    # הפעלת הבוט ב-thread נפרד
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
     
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    # הפעלת Flask
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
