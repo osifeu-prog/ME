@@ -367,7 +367,7 @@ def help_command(update, context):
             f"🤖 *פקודות זמינות בקבוצה:*\n\n"
             f"📍 *הזכירו אותי עם @{BOT_USERNAME}* או השתמשו בפקודות:\n\n"
             f"`@{BOT_USERNAME} סטטוס` - מצב הבוט\n"
-            f"`@{B�_USERNAME} מידע` - מידע על הבוט\n"
+            f"`@{BOT_USERNAME} מידע` - מידע על הבוט\n"
             f"`@{BOT_USERNAME} עזרה` - הודעה זו\n"
             f"`@{BOT_USERNAME} id` - הצג ID\n\n"
             f"📌 *פקודות ישירות:*\n"
@@ -918,7 +918,7 @@ def unknown(update, context):
         for entity in message.entities:
             if entity.type == 'bot_command' and BOT_USERNAME and f"@{BOT_USERNAME}" in message.text:
                 update.message.reply_text(
-                    f"❓ *פקודה לא מזוהה ל{БОТ_NAME}*\n"
+                    f"❓ *פקודה לא מזוהה ל{BOT_NAME}*\n"
                     f"השתמש ב @{BOT_USERNAME} עזרה כדי לראות את הפקודות.\n\n"
                     f"🆔 *ID הבוט:* `{BOT_ID}`",
                     parse_mode=ParseMode.MARKDOWN
