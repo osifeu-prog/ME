@@ -6,7 +6,6 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 
-# התקנה עם פקודות דיבאג כדי לראות היכן הותקנו חבילות ובמיוחד gunicorn
 RUN apt-get update \
   && apt-get install -y --no-install-recommends build-essential gcc libffi-dev libssl-dev ca-certificates \
   && python -m pip install --upgrade pip setuptools wheel \
@@ -28,9 +27,8 @@ RUN apt-get update \
 
 COPY . /app
 
-# אם pip התקין ל־user base, ודא שהנתיב כלול
 ENV PATH="/root/.local/bin:${PATH}"
 ENV PORT=8080
 
-# Exec form — קל יותר לדיבאג ולניהול תהליכים
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "bot:app", "--workers", "2", "--timeout", "30"]
+# שימוש ב‑python -m gunicorn כגיבוי אם ה־entrypoint לא נמצא ב‑PATH
+CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:8080", "bot:app", "--workers", "2", "--timeout", "30"]
