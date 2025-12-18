@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install uvicorn[standard]
 
 COPY . .
 
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "--workers", "4", "--threads", "2", "bot:app"]
+CMD uvicorn bot:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers
