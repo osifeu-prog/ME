@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import time
 from datetime import datetime
 from flask import Flask, request, jsonify
 from telegram import Bot, Update
@@ -26,9 +27,13 @@ PORT = int(os.environ.get('PORT', 8080))
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN is required!")
 
-# Bot initialization
-bot = Bot(token=TOKEN)
-dispatcher = Dispatcher(bot, None, workers=2)
+# Bot initialization with better error handling
+try:
+    bot = Bot(token=TOKEN, request_timeout=30)
+    dispatcher = Dispatcher(bot, None, workers=2)
+except Exception as e:
+    logger.error(f"Failed to initialize bot: {e}")
+    raise
 
 # Simple stats tracking
 bot_stats = {
@@ -36,33 +41,32 @@ bot_stats = {
     'message_count': 0,
     'users': set(),
     'start_time': datetime.now().isoformat(),
-    'last_update': None
+    'last_update': None,
+    'errors': 0
 }
 
-# ==================== WEBHOOK FIX ====================
-def fix_webhook_url(url):
-    """Ensure webhook URL has correct path"""
-    if not url:
-        return None
-    
-    # Remove any trailing slash
-    url = url.rstrip('/')
-    
-    # Add /webhook if missing
-    if not url.endswith('/webhook'):
-        url = url + '/webhook'
-    
-    return url
-
-# Get correct webhook URL
-CORRECT_WEBHOOK_URL = fix_webhook_url(WEBHOOK_URL)
-if CORRECT_WEBHOOK_URL:
-    logger.info(f"🌐 Webhook URL: {CORRECT_WEBHOOK_URL}")
+# Broadcast message storage (simple in-memory)
+broadcast_messages = []
 
 # ==================== HELPER FUNCTIONS ====================
 def is_admin(user_id):
     """Check if user is admin"""
     return ADMIN_USER_ID and str(user_id) == ADMIN_USER_ID
+
+def safe_send_message(chat_id, text, parse_mode=None):
+    """Safely send message with error handling"""
+    try:
+        bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            timeout=20
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send message to {chat_id}: {e}")
+        bot_stats['errors'] += 1
+        return False
 
 def log_message(update, command=None):
     """Log incoming messages"""
@@ -102,12 +106,14 @@ def start(update, context):
         f"/id - הצג את ה-ID שלך\n"
         f"/info - מידע על הבוט\n"
         f"/ping - בדיקת חיים\n"
+        f"/echo <טקסט> - הד בחזרה\n"
     )
     
     if is_admin(user.id):
-        welcome_text += "\n👑 *פקודות מנהל:*\n/admin - לוח בקרה\n/stats - סטטיסטיקות\n"
+        welcome_text += "\n👑 *פקודות מנהל:*\n/admin - לוח בקרה\n/stats - סטטיסטיקות\n/broadcast - שידור הודעה\n"
     
-    update.message.reply_text(welcome_text, parse_mode='Markdown')
+    # Use safe send
+    safe_send_message(update.effective_chat.id, welcome_text, parse_mode='Markdown')
 
 def help_command(update, context):
     """Handle /help command"""
@@ -120,17 +126,20 @@ def help_command(update, context):
         "/help - הצג הודעה זו\n"
         "/id - הצג את ה-ID שלך\n"
         "/info - מידע על הבוט\n"
-        "/ping - בדיקת חיים\n\n"
+        "/ping - בדיקת חיים\n"
+        "/echo <טקסט> - הדבקת טקסט\n\n"
         "👑 *פקודות מנהל:*\n"
         "/admin - לוח בקרה (מנהל בלבד)\n"
-        "/stats - סטטיסטיקות (מנהל בלבד)\n\n"
+        "/stats - סטטיסטיקות (מנהל בלבד)\n"
+        "/broadcast - שידור לכולם (מנהל בלבד)\n\n"
         "💡 *טיפים:*\n"
         "• השתמש ב-Markdown לעיצוב\n"
         "• *מודגש* `קוד` _נטוי_\n"
-        "• שורה חדשה - רווח כפול"
+        "• שורה חדשה - רווח כפול\n"
+        "• /echo שלום עולם - יחזיר 'שלום עולם'"
     )
     
-    update.message.reply_text(help_text, parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, help_text, parse_mode='Markdown')
 
 def show_id(update, context):
     """Handle /id command"""
@@ -148,9 +157,9 @@ def show_id(update, context):
     )
     
     if is_admin(user.id):
-        id_text += f"\n✅ *סטטוס:* מנ�יאל"
+        id_text += f"\n✅ *סטטוס:* מנהל"
     
-    update.message.reply_text(id_text, parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, id_text, parse_mode='Markdown')
 
 def bot_info(update, context):
     """Handle /info command"""
@@ -166,50 +175,69 @@ def bot_info(update, context):
         f"• 📨 *הודעות שקיבל:* {bot_stats['message_count']}\n"
         f"• 👥 *משתמשים ייחודיים:* {len(bot_stats['users'])}\n"
         f"• 🚀 *פקודות /start:* {bot_stats['start_count']}\n"
-        f"• 🔗 *Webhook:* {'פעיל ✅' if CORRECT_WEBHOOK_URL else 'לא מוגדר'}\n"
+        f"• ❌ *שגיאות שליחה:* {bot_stats['errors']}\n"
+        f"• 🔗 *Webhook:* {'פעיל ✅' if WEBHOOK_URL else 'לא מוגדר'}\n"
         f"• 🏗️ *פלטפורמה:* Railway\n"
     )
     
-    update.message.reply_text(info_text, parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, info_text, parse_mode='Markdown')
 
 def ping(update, context):
     """Handle /ping command - quick response test"""
     log_message(update, 'ping')
-    update.message.reply_text("🏓 *פונג!* הבוט חי ותקין.", parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, "🏓 *פונג!* הבוט חי ותקין.", parse_mode='Markdown')
+
+def echo_command(update, context):
+    """Handle /echo command - echo with text"""
+    log_message(update, 'echo')
+    
+    # Get text after command
+    text = ' '.join(context.args) if context.args else ''
+    
+    if not text:
+        response = "❌ *שימוש:* /echo <טקסט>\nלדוגמה: /echo שלום עולם"
+    else:
+        response = f"📣 *הד:*\n{text}"
+    
+    safe_send_message(update.effective_chat.id, response, parse_mode='Markdown')
 
 def admin_panel(update, context):
     """Handle /admin command - Admin only"""
     user = update.effective_user
     
     if not is_admin(user.id):
-        update.message.reply_text("❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
+        safe_send_message(update.effective_chat.id, "❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
         return
     
     log_message(update, 'admin')
     
     uptime = datetime.now() - datetime.fromisoformat(bot_stats['start_time'])
+    hours, remainder = divmod(uptime.total_seconds(), 3600)
+    minutes, seconds = divmod(remainder, 60)
     
     admin_text = (
         f"👑 *לוח בקרה למנהל*\n\n"
         f"*מנהל:* {user.first_name} (ID: `{user.id}`)\n"
-        f"*זמן פעילות:* {uptime}\n\n"
+        f"*זמן פעילות:* {int(hours)}h {int(minutes)}m {int(seconds)}s\n\n"
         f"📊 *סטטיסטיקות מהירות:*\n"
         f"• הודעות: {bot_stats['message_count']}\n"
         f"• משתמשים: {len(bot_stats['users'])}\n"
-        f"• התחלות: {bot_stats['start_count']}\n\n"
-        f"⚙️ *פקודות נוספות:*\n"
+        f"• התחלות: {bot_stats['start_count']}\n"
+        f"• שגיאות: {bot_stats['errors']}\n\n"
+        f"⚙️ *פקודות מנהל:*\n"
         "/stats - סטטיסטיקות מפורטות\n"
-        "/broadcast - שליחת הודעה לכולם (בפיתוח)\n"
+        "/broadcast <הודעה> - שידור לכולם\n"
+        "/echo <טקסט> - בדיקת שליחה\n"
     )
     
-    update.message.reply_text(admin_text, parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, admin_text, parse_mode='Markdown')
 
 def admin_stats(update, context):
     """Handle /stats command - Detailed stats for admin"""
     user = update.effective_user
     
     if not is_admin(user.id):
-        update.message.reply_text("❌ *גישה נדחית!*", parse_mode='Markdown')
+        safe_send_message(update.effective_chat.id, "❌ *גישה נדחית!*", parse_mode='Markdown')
         return
     
     log_message(update, 'stats')
@@ -233,9 +261,19 @@ def admin_stats(update, context):
         f"*פעילות:*\n"
         f"• הודעות שקיבל: {bot_stats['message_count']}\n"
         f"• פקודות /start: {bot_stats['start_count']}\n"
-        f"• משתמשים ייחודיים: {len(bot_stats['users'])}\n\n"
-        f"*משתמשים אחרונים (10):*\n"
+        f"• משתמשים ייחודיים: {len(bot_stats['users'])}\n"
+        f"• שגיאות שליחה: {bot_stats['errors']}\n\n"
+        f"*שידורים אחרונים:*\n"
     )
+    
+    # Add broadcast history
+    if broadcast_messages:
+        for i, msg in enumerate(broadcast_messages[-5:], 1):
+            stats_text += f"{i}. {msg['text'][:30]}... ({msg['timestamp']})\n"
+    else:
+        stats_text += "אין שידורים עדיין\n"
+    
+    stats_text += f"\n*משתמשים אחרונים (10):*\n"
     
     # Add users list
     for i, user_id in enumerate(users_list, 1):
@@ -244,23 +282,104 @@ def admin_stats(update, context):
     if len(bot_stats['users']) > 10:
         stats_text += f"... ועוד {len(bot_stats['users']) - 10} משתמשים\n"
     
-    stats_text += f"\n*Webhook:* {CORRECT_WEBHOOK_URL or 'לא מוגדר'}"
+    stats_text += f"\n*Webhook:* {WEBHOOK_URL or 'לא מוגדר'}"
     
-    update.message.reply_text(stats_text, parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, stats_text, parse_mode='Markdown')
+
+def broadcast_command(update, context):
+    """Handle /broadcast command - Send message to all users"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        safe_send_message(update.effective_chat.id, "❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
+        return
+    
+    # Get broadcast message
+    message = ' '.join(context.args) if context.args else ''
+    
+    if not message:
+        safe_send_message(
+            update.effective_chat.id,
+            "❌ *שימוש:* /broadcast <הודעה>\n\n"
+            "*דוגמה:*\n"
+            "/broadcast הודעה חשובה לכולם!\n\n"
+            "⚠️ *אזהרה:* ההודעה תישלח לכל המשתמשים שהשתמשו בבוט.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    log_message(update, 'broadcast')
+    
+    # Store broadcast message
+    broadcast_data = {
+        'text': message,
+        'from_admin': user.id,
+        'timestamp': datetime.now().isoformat(),
+        'sent_to': 0,
+        'failed': 0
+    }
+    
+    # Send to admin first
+    safe_send_message(
+        update.effective_chat.id,
+        f"📢 *מתחיל שידור לכולם:*\n\n{message}\n\n"
+        f"👥 *משתמשים:* {len(bot_stats['users'])}\n"
+        f"⏳ *שולח...*",
+        parse_mode='Markdown'
+    )
+    
+    # Send to all users
+    success_count = 0
+    fail_count = 0
+    
+    for user_id in bot_stats['users']:
+        if str(user_id) == ADMIN_USER_ID:
+            continue  # Skip admin
+        
+        if safe_send_message(user_id, f"📢 *הודעה מהמנהל:*\n\n{message}", parse_mode='Markdown'):
+            success_count += 1
+        else:
+            fail_count += 1
+        
+        # Small delay to avoid rate limits
+        time.sleep(0.1)
+    
+    # Update broadcast data
+    broadcast_data['sent_to'] = success_count
+    broadcast_data['failed'] = fail_count
+    broadcast_messages.append(broadcast_data)
+    
+    # Keep only last 20 broadcasts
+    if len(broadcast_messages) > 20:
+        broadcast_messages.pop(0)
+    
+    # Send report to admin
+    report_text = (
+        f"✅ *שידור הושלם!*\n\n"
+        f"📝 *הודעה:* {message[:50]}...\n\n"
+        f"📊 *תוצאות:*\n"
+        f"• ✅ נשלח בהצלחה: {success_count}\n"
+        f"• ❌ נכשל: {fail_count}\n"
+        f"• 👥 סה״כ נמענים: {len(bot_stats['users'])}\n"
+        f"• ⏱️ זמן: {datetime.now().strftime('%H:%M:%S')}"
+    )
+    
+    safe_send_message(update.effective_chat.id, report_text, parse_mode='Markdown')
 
 def echo(update, context):
-    """Echo user messages"""
+    """Echo user messages (not commands)"""
     log_message(update, 'echo')
     text = update.message.text
     
     # Simple response with Markdown formatting
     response = f"📝 *אתה כתבת:*\n`{text}`"
-    update.message.reply_text(response, parse_mode='Markdown')
+    safe_send_message(update.effective_chat.id, response, parse_mode='Markdown')
 
 def unknown(update, context):
     """Handle unknown commands"""
     log_message(update, 'unknown')
-    update.message.reply_text(
+    safe_send_message(
+        update.effective_chat.id,
         "❓ *פקודה לא מזוהה*\n"
         "השתמש ב /help כדי לראות את רשימת הפקודות.",
         parse_mode='Markdown'
@@ -273,10 +392,12 @@ dispatcher.add_handler(CommandHandler("help", help_command))
 dispatcher.add_handler(CommandHandler("id", show_id))
 dispatcher.add_handler(CommandHandler("info", bot_info))
 dispatcher.add_handler(CommandHandler("ping", ping))
+dispatcher.add_handler(CommandHandler("echo", echo_command, pass_args=True))
 dispatcher.add_handler(CommandHandler("admin", admin_panel))
 dispatcher.add_handler(CommandHandler("stats", admin_stats))
+dispatcher.add_handler(CommandHandler("broadcast", broadcast_command, pass_args=True))
 
-# Message handler
+# Message handler for non-command text
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, echo))
 
 # Unknown command handler (must be last)
@@ -294,11 +415,12 @@ def home():
             "uptime": bot_stats['start_time'],
             "messages": bot_stats['message_count'],
             "unique_users": len(bot_stats['users']),
-            "starts": bot_stats['start_count']
+            "starts": bot_stats['start_count'],
+            "errors": bot_stats['errors']
         },
-        "webhook": CORRECT_WEBHOOK_URL if CORRECT_WEBHOOK_URL else "not_configured",
+        "webhook": WEBHOOK_URL if WEBHOOK_URL else "not_configured",
         "admin_configured": bool(ADMIN_USER_ID),
-        "note": "Telegram should POST to /webhook, not /"
+        "broadcasts_sent": len(broadcast_messages)
     })
 
 @app.route('/webhook', methods=['POST'])
@@ -330,6 +452,7 @@ def webhook():
         return 'OK', 200
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
+        bot_stats['errors'] += 1
         return 'Error', 500
 
 @app.route('/health')
@@ -342,26 +465,9 @@ def health():
         "stats": {
             "messages": bot_stats['message_count'],
             "users": len(bot_stats['users']),
-            "uptime": bot_stats['start_time']
+            "uptime": bot_stats['start_time'],
+            "errors": bot_stats['errors']
         }
-    })
-
-@app.route('/debug/webhook', methods=['GET', 'POST'])
-def debug_webhook():
-    """Debug endpoint to check webhook configuration"""
-    if request.method == 'POST':
-        # Simulate Telegram webhook
-        return jsonify({
-            "message": "This is a test. Real Telegram webhooks go to /webhook",
-            "your_data": request.get_json(),
-            "correct_endpoint": "/webhook"
-        })
-    
-    return jsonify({
-        "webhook_status": "Debug endpoint",
-        "correct_url": CORRECT_WEBHOOK_URL,
-        "telegram_should_post_to": "/webhook",
-        "check_telegram": f"https://api.telegram.org/bot[TOKEN]/getWebhookInfo"
     })
 
 @app.route('/admin/web', methods=['GET'])
@@ -374,19 +480,26 @@ def admin_web():
     return jsonify({
         "stats": bot_stats,
         "users_count": len(bot_stats['users']),
+        "users_list": list(bot_stats['users'])[:50],
         "uptime": bot_stats['start_time'],
         "current_time": datetime.now().isoformat(),
-        "webhook_url": CORRECT_WEBHOOK_URL
+        "webhook_url": WEBHOOK_URL,
+        "broadcasts": broadcast_messages[-10:] if broadcast_messages else []
     })
 
 # ==================== INITIALIZATION ====================
 def setup_webhook():
     """Setup webhook if URL is provided"""
-    if CORRECT_WEBHOOK_URL:
+    if WEBHOOK_URL and not WEBHOOK_URL.endswith('/webhook'):
+        corrected_url = WEBHOOK_URL.rstrip('/') + '/webhook'
+    else:
+        corrected_url = WEBHOOK_URL
+    
+    if corrected_url:
         try:
             # Try to set webhook with the correct URL
-            bot.set_webhook(url=CORRECT_WEBHOOK_URL)
-            logger.info(f"✅ Webhook configured: {CORRECT_WEBHOOK_URL}")
+            bot.set_webhook(url=corrected_url)
+            logger.info(f"✅ Webhook configured: {corrected_url}")
             
             # Also log the current webhook info for debugging
             try:
@@ -410,7 +523,7 @@ if __name__ == '__main__':
     
     logger.info(f"👑 Admin ID: {ADMIN_USER_ID or 'Not configured'}")
     logger.info(f"🔐 Webhook Secret: {'Set' if WEBHOOK_SECRET else 'Not set'}")
-    logger.info(f"🌐 Correct Webhook URL: {CORRECT_WEBHOOK_URL or 'None'}")
+    logger.info(f"🌐 Webhook URL: {WEBHOOK_URL or 'None'}")
     
     # Setup webhook
     setup_webhook()
