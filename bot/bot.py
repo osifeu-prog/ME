@@ -12,7 +12,11 @@ from telegram.utils.helpers import escape_markdown
 # ==================== CONFIGURATION ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,13 @@ try:
     BOT_USERNAME = bot_info.username
     BOT_ID = bot_info.id
     BOT_NAME = bot_info.first_name
-    logger.info(f"🤖 Bot loaded: @{BOT_USERNAME} (ID: {BOT_ID})")
+    logger.info(f"🤖 Bot loaded: @{BOT_USERNAME} (ID: {BOT_ID}, Name: {BOT_NAME})")
 except Exception as e:
     logger.error(f"Failed to get bot info: {e}")
-    BOT_USERNAME = "unknown_bot"
-    BOT_ID = "unknown"
-    BOT_NAME = "Telegram Bot"
+    # Fallback to environment variables
+    BOT_USERNAME = os.environ.get('BOT_USERNAME', 'unknown_bot')
+    BOT_ID = os.environ.get('BOT_ID', 'unknown')
+    BOT_NAME = os.environ.get('BOT_NAME', 'Telegram Bot')
 
 # Storage files
 DATA_DIR = "data"
@@ -363,7 +368,9 @@ def help_command(update, context):
             "/admin - לוח בקרה\n"
             "/stats - סטטיסטיקות מפורטות\n"
             "/broadcast - שידור לכולם\n"
-            "/users - ניהול משתמשים\n\n"
+            "/users - ניהול משתמשים\n"
+            "/export - ייצוא נתונים\n"
+            "/restart - אתחול בוט\n\n"
             "💡 *בקבוצות:*\n"
             f"הזכירו אותי עם @{BOT_USERNAME}\n"
             "או השתמשו בפקודות ישירות\n\n"
@@ -392,8 +399,9 @@ def help_command(update, context):
         update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Error sending help: {e}")
-        # Fallback without markdown
-        update.message.reply_text(help_text.replace('*', '').replace('`', ''), parse_mode=ParseMode.HTML)
+        # Fallback without markdown - more reliable
+        plain_text = help_text.replace('*', '').replace('`', '').replace('_', '')
+        update.message.reply_text(plain_text)
 
 def about_command(update, context):
     """Handle /about command - Information about bot's purpose"""
@@ -592,7 +600,7 @@ def admin_panel(update, context):
         "/broadcast - שידור לכולם\n"
         "/users - ניהול משתמשים\n"
         "/export - ייצוא נתונים\n"
-        "/restart - אתחול (בפיתוח)"
+        "/restart - אתחול בוט"
     )
     
     update.message.reply_text(
@@ -822,6 +830,65 @@ def users_command(update, context):
     
     update.message.reply_text(users_text, parse_mode=ParseMode.MARKDOWN)
 
+def export_command(update, context):
+    """Handle /export command - Export data"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'export')
+    
+    export_text = (
+        f"📤 *ייצוא נתונים - {BOT_NAME}*\n\n"
+        f"*נתונים זמינים לייצוא:*\n"
+        f"• משתמשים: {len(users_db)} רשומות\n"
+        f"• קבוצות: {len(groups_db)} רשומות\n"
+        f"• הודעות: {len(messages_db)} רשומות\n"
+        f"• שידורים: {len(broadcasts_db)} רשומות\n\n"
+        f"⚙️ *אופציות ייצוא:*\n"
+        f"/export users - ייצוא משתמשים\n"
+        f"/export groups - ייצוא קבוצות\n"
+        f"/export messages - ייצוא הודעות\n"
+        f"/export all - ייצוא הכול\n\n"
+        f"💾 *הנתונים נשמרים אוטומטית ב:*\n"
+        f"`{USERS_FILE}`\n`{GROUPS_FILE}`\n`{MESSAGES_FILE}`"
+    )
+    
+    update.message.reply_text(export_text, parse_mode=ParseMode.MARKDOWN)
+
+def restart_command(update, context):
+    """Handle /restart command - Restart bot"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'restart')
+    
+    restart_text = (
+        f"♻️ *אתחול בוט - {BOT_NAME}*\n\n"
+        f"*הפעולה תבצע:*\n"
+        f"1. שמירת כל הנתונים הנוכחיים\n"
+        f"2. איפוס סטטיסטיקות בזיכרון\n"
+        f"3. אתחול תהליך הבוט\n\n"
+        f"📊 *נתונים לפני אתחול:*\n"
+        f"• הודעות: {bot_stats['message_count']}\n"
+        f"• משתמשים: {len(bot_stats['users'])}\n"
+        f"• קבוצות: {len(bot_stats['groups'])}\n\n"
+        f"⚠️ *שים לב:*\n"
+        f"בסביבת Railway, האתחול יתבצע אוטומטית\n"
+        f"לאחר פריסה חדשה או שינוי בקוד.\n\n"
+        f"🤖 *ID הבוט:* `{BOT_ID}`"
+    )
+    
+    update.message.reply_text(restart_text, parse_mode=ParseMode.MARKDOWN)
+    
+    # Note: In Railway, restart happens automatically on redeploy
+    # For actual restart, you'd need to implement a proper restart mechanism
+
 def handle_text(update, context):
     """Handle regular text messages (with buttons and group mentions)"""
     message = update.message
@@ -897,13 +964,7 @@ def handle_text(update, context):
         update.message.reply_text(settings_text, parse_mode=ParseMode.MARKDOWN)
     
     elif text == "🔄 אתחול בוט" and is_admin(user.id):
-        update.message.reply_text(
-            "♻️ *אתחול בוט*\n\n"
-            "פונקציה זו תשוחרר בגרסאות עתידיות.\n"
-            "לעת עתה, ניתן לבצע אתחול ידני ב-Railway.\n\n"
-            f"🤖 *ID הבוט:* `{BOT_ID}`",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        restart_command(update, context)
     
     # Handle group mentions
     elif BOT_USERNAME and f"@{BOT_USERNAME}" in message.text:
@@ -977,17 +1038,27 @@ def unknown(update, context):
 
 def error_handler(update, context):
     """Handle errors in the bot"""
-    logger.error(f"Update {update} caused error {context.error}")
+    error_msg = str(context.error) if context.error else "Unknown error"
+    logger.error(f"Update {update} caused error: {error_msg}", exc_info=True)
     
     try:
-        # Try to send error message to user
         if update and update.effective_chat:
-            update.effective_chat.send_message(
-                f"❌ *שגיאה בבוט:*\n\n"
-                f"התרחשה שגיאה טכנית. אנא נסה שוב מאוחר יותר.\n\n"
-                f"🤖 *ID הבוט:* `{BOT_ID}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            # Only send error details to admin
+            user = update.effective_user
+            if user and is_admin(user.id):
+                update.effective_chat.send_message(
+                    f"❌ *שגיאה בבוט:*\n\n"
+                    f"```\n{error_msg[:200]}\n```\n\n"
+                    f"🤖 *ID הבוט:* `{BOT_ID}`",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                # For regular users - general message
+                update.effective_chat.send_message(
+                    f"⚠️ *אירעה שגיאה* אנא נסה שוב מאוחר יותר.\n\n"
+                    f"🤖 *ID הבוט:* `{BOT_ID}`",
+                    parse_mode=ParseMode.MARKDOWN
+                )
     except Exception as e:
         logger.error(f"Error in error handler: {e}")
 
@@ -1005,6 +1076,8 @@ dispatcher.add_handler(CommandHandler("admin", admin_panel))
 dispatcher.add_handler(CommandHandler("stats", admin_stats))
 dispatcher.add_handler(CommandHandler("broadcast", broadcast_command, pass_args=True))
 dispatcher.add_handler(CommandHandler("users", users_command))
+dispatcher.add_handler(CommandHandler("export", export_command))
+dispatcher.add_handler(CommandHandler("restart", restart_command))
 
 # Text message handler (for buttons and group mentions)
 dispatcher.add_handler(MessageHandler(Filters.text, handle_text))
@@ -1053,11 +1126,14 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Telegram webhook endpoint"""
-    if WEBHOOK_SECRET:
+    # Check webhook secret if set
+    if WEBHOOK_SECRET and WEBHOOK_SECRET.strip():
         secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
         if secret != WEBHOOK_SECRET:
-            logger.warning("Unauthorized webhook attempt")
+            logger.warning(f"Unauthorized webhook attempt. Expected: '{WEBHOOK_SECRET}', Got: '{secret}'")
             return 'Unauthorized', 403
+    else:
+        logger.warning("WEBHOOK_SECRET not set, skipping authentication")
     
     try:
         data = request.get_json()
