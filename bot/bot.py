@@ -27,56 +27,119 @@ PORT = int(os.environ.get('PORT', 8080))
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN is required!")
 
-# Bot initialization with better error handling
-try:
-    bot = Bot(token=TOKEN, request_timeout=30)
-    dispatcher = Dispatcher(bot, None, workers=2)
-except Exception as e:
-    logger.error(f"Failed to initialize bot: {e}")
-    raise
+# Bot initialization
+bot = Bot(token=TOKEN)
+dispatcher = Dispatcher(bot, None, workers=2)
 
-# Simple stats tracking
+# Storage files
+DATA_DIR = "data"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+MESSAGES_FILE = os.path.join(DATA_DIR, "messages.json")
+BROADCASTS_FILE = os.path.join(DATA_DIR, "broadcasts.json")
+
+# Ensure data directory exists
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ==================== STORAGE FUNCTIONS ====================
+def load_json(filepath, default=None):
+    """Load JSON file, return default if file doesn't exist"""
+    if default is None:
+        default = {}
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading {filepath}: {e}")
+    return default
+
+def save_json(filepath, data):
+    """Save data to JSON file"""
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving {filepath}: {e}")
+        return False
+
+# Load existing data
+users_db = load_json(USERS_FILE, [])
+messages_db = load_json(MESSAGES_FILE, [])
+broadcasts_db = load_json(BROADCASTS_FILE, [])
+
+# Simple stats tracking in memory
 bot_stats = {
     'start_count': 0,
     'message_count': 0,
     'users': set(),
     'start_time': datetime.now().isoformat(),
-    'last_update': None,
-    'errors': 0
+    'last_update': None
 }
 
-# Broadcast message storage (simple in-memory)
-broadcast_messages = []
+# Load users into memory
+for user in users_db:
+    if 'user_id' in user:
+        bot_stats['users'].add(user['user_id'])
+        bot_stats['message_count'] += user.get('message_count', 0)
+        if user.get('first_seen'):
+            bot_stats['start_count'] += 1
 
 # ==================== HELPER FUNCTIONS ====================
 def is_admin(user_id):
     """Check if user is admin"""
     return ADMIN_USER_ID and str(user_id) == ADMIN_USER_ID
 
-def safe_send_message(chat_id, text, parse_mode=None):
-    """Safely send message with error handling"""
-    try:
-        bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode=parse_mode,
-            timeout=20
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send message to {chat_id}: {e}")
-        bot_stats['errors'] += 1
-        return False
+def get_or_create_user(user_data):
+    """Get existing user or create new one"""
+    user_id = user_data['id']
+    
+    for user in users_db:
+        if user['user_id'] == user_id:
+            # Update user info
+            user.update({
+                'username': user_data.get('username'),
+                'first_name': user_data.get('first_name'),
+                'last_name': user_data.get('last_name'),
+                'last_seen': datetime.now().isoformat(),
+                'message_count': user.get('message_count', 0) + 1
+            })
+            save_json(USERS_FILE, users_db)
+            return user
+    
+    # Create new user
+    new_user = {
+        'user_id': user_id,
+        'username': user_data.get('username'),
+        'first_name': user_data.get('first_name'),
+        'last_name': user_data.get('last_name'),
+        'first_seen': datetime.now().isoformat(),
+        'last_seen': datetime.now().isoformat(),
+        'message_count': 1,
+        'is_admin': is_admin(user_id)
+    }
+    users_db.append(new_user)
+    save_json(USERS_FILE, users_db)
+    return new_user
 
 def log_message(update, command=None):
-    """Log incoming messages"""
+    """Log incoming messages to database"""
     user = update.effective_user
     chat = update.effective_chat
     
-    log_data = {
-        'user_id': user.id,
+    # Update or create user
+    user_data = {
+        'id': user.id,
         'username': user.username,
         'first_name': user.first_name,
+        'last_name': user.last_name
+    }
+    get_or_create_user(user_data)
+    
+    # Create message log
+    message_log = {
+        'message_id': update.message.message_id if update.message else None,
+        'user_id': user.id,
         'chat_id': chat.id,
         'chat_type': chat.type,
         'text': update.message.text if update.message else None,
@@ -84,13 +147,20 @@ def log_message(update, command=None):
         'timestamp': datetime.now().isoformat()
     }
     
-    logger.info(f"📝 Message: {json.dumps(log_data, ensure_ascii=False)}")
+    messages_db.append(message_log)
+    if len(messages_db) > 1000:  # Keep only last 1000 messages
+        messages_db.pop(0)
+    save_json(MESSAGES_FILE, messages_db)
+    
+    # Update memory stats
     bot_stats['message_count'] += 1
     bot_stats['users'].add(user.id)
     bot_stats['last_update'] = datetime.now().isoformat()
     
     if command == 'start':
         bot_stats['start_count'] += 1
+    
+    logger.info(f"📝 Message from {user.first_name}: {update.message.text[:50] if update.message else 'No text'}")
 
 # ==================== BOT COMMANDS ====================
 def start(update, context):
@@ -106,14 +176,12 @@ def start(update, context):
         f"/id - הצג את ה-ID שלך\n"
         f"/info - מידע על הבוט\n"
         f"/ping - בדיקת חיים\n"
-        f"/echo <טקסט> - הד בחזרה\n"
     )
     
     if is_admin(user.id):
         welcome_text += "\n👑 *פקודות מנהל:*\n/admin - לוח בקרה\n/stats - סטטיסטיקות\n/broadcast - שידור הודעה\n"
     
-    # Use safe send
-    safe_send_message(update.effective_chat.id, welcome_text, parse_mode='Markdown')
+    update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 def help_command(update, context):
     """Handle /help command"""
@@ -126,8 +194,7 @@ def help_command(update, context):
         "/help - הצג הודעה זו\n"
         "/id - הצג את ה-ID שלך\n"
         "/info - מידע על הבוט\n"
-        "/ping - בדיקת חיים\n"
-        "/echo <טקסט> - הדבקת טקסט\n\n"
+        "/ping - בדיקת חיים\n\n"
         "👑 *פקודות מנהל:*\n"
         "/admin - לוח בקרה (מנהל בלבד)\n"
         "/stats - סטטיסטיקות (מנהל בלבד)\n"
@@ -135,11 +202,10 @@ def help_command(update, context):
         "💡 *טיפים:*\n"
         "• השתמש ב-Markdown לעיצוב\n"
         "• *מודגש* `קוד` _נטוי_\n"
-        "• שורה חדשה - רווח כפול\n"
-        "• /echo שלום עולם - יחזיר 'שלום עולם'"
+        "• שורה חדשה - רווח כפול"
     )
     
-    safe_send_message(update.effective_chat.id, help_text, parse_mode='Markdown')
+    update.message.reply_text(help_text, parse_mode='Markdown')
 
 def show_id(update, context):
     """Handle /id command"""
@@ -159,7 +225,7 @@ def show_id(update, context):
     if is_admin(user.id):
         id_text += f"\n✅ *סטטוס:* מנהל"
     
-    safe_send_message(update.effective_chat.id, id_text, parse_mode='Markdown')
+    update.message.reply_text(id_text, parse_mode='Markdown')
 
 def bot_info(update, context):
     """Handle /info command"""
@@ -175,69 +241,53 @@ def bot_info(update, context):
         f"• 📨 *הודעות שקיבל:* {bot_stats['message_count']}\n"
         f"• 👥 *משתמשים ייחודיים:* {len(bot_stats['users'])}\n"
         f"• 🚀 *פקודות /start:* {bot_stats['start_count']}\n"
-        f"• ❌ *שגיאות שליחה:* {bot_stats['errors']}\n"
+        f"• 💾 *הודעות שמורות:* {len(messages_db)}\n"
         f"• 🔗 *Webhook:* {'פעיל ✅' if WEBHOOK_URL else 'לא מוגדר'}\n"
         f"• 🏗️ *פלטפורמה:* Railway\n"
     )
     
-    safe_send_message(update.effective_chat.id, info_text, parse_mode='Markdown')
+    update.message.reply_text(info_text, parse_mode='Markdown')
 
 def ping(update, context):
     """Handle /ping command - quick response test"""
     log_message(update, 'ping')
-    safe_send_message(update.effective_chat.id, "🏓 *פונג!* הבוט חי ותקין.", parse_mode='Markdown')
-
-def echo_command(update, context):
-    """Handle /echo command - echo with text"""
-    log_message(update, 'echo')
-    
-    # Get text after command
-    text = ' '.join(context.args) if context.args else ''
-    
-    if not text:
-        response = "❌ *שימוש:* /echo <טקסט>\nלדוגמה: /echo שלום עולם"
-    else:
-        response = f"📣 *הד:*\n{text}"
-    
-    safe_send_message(update.effective_chat.id, response, parse_mode='Markdown')
+    update.message.reply_text("🏓 *פונג!* הבוט חי ותקין.", parse_mode='Markdown')
 
 def admin_panel(update, context):
     """Handle /admin command - Admin only"""
     user = update.effective_user
     
     if not is_admin(user.id):
-        safe_send_message(update.effective_chat.id, "❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
+        update.message.reply_text("❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
         return
     
     log_message(update, 'admin')
     
     uptime = datetime.now() - datetime.fromisoformat(bot_stats['start_time'])
-    hours, remainder = divmod(uptime.total_seconds(), 3600)
-    minutes, seconds = divmod(remainder, 60)
     
     admin_text = (
         f"👑 *לוח בקרה למנהל*\n\n"
         f"*מנהל:* {user.first_name} (ID: `{user.id}`)\n"
-        f"*זמן פעילות:* {int(hours)}h {int(minutes)}m {int(seconds)}s\n\n"
+        f"*זמן פעילות:* {uptime}\n\n"
         f"📊 *סטטיסטיקות מהירות:*\n"
         f"• הודעות: {bot_stats['message_count']}\n"
         f"• משתמשים: {len(bot_stats['users'])}\n"
         f"• התחלות: {bot_stats['start_count']}\n"
-        f"• שגיאות: {bot_stats['errors']}\n\n"
+        f"• שידורים: {len(broadcasts_db)}\n\n"
         f"⚙️ *פקודות מנהל:*\n"
         "/stats - סטטיסטיקות מפורטות\n"
-        "/broadcast <הודעה> - שידור לכולם\n"
-        "/echo <טקסט> - בדיקת שליחה\n"
+        "/broadcast - שליחת הודעה לכולם\n"
+        "/export - ייצוא נתונים (בפיתוח)\n"
     )
     
-    safe_send_message(update.effective_chat.id, admin_text, parse_mode='Markdown')
+    update.message.reply_text(admin_text, parse_mode='Markdown')
 
 def admin_stats(update, context):
     """Handle /stats command - Detailed stats for admin"""
     user = update.effective_user
     
     if not is_admin(user.id):
-        safe_send_message(update.effective_chat.id, "❌ *גישה נדחית!*", parse_mode='Markdown')
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode='Markdown')
         return
     
     log_message(update, 'stats')
@@ -249,8 +299,13 @@ def admin_stats(update, context):
     hours, remainder = divmod(uptime.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     
-    # Get list of users (first 10)
-    users_list = list(bot_stats['users'])[:10]
+    # Get active users (last 7 days)
+    week_ago = datetime.now().timestamp() - (7 * 24 * 3600)
+    active_users = []
+    for user_record in users_db:
+        last_seen = datetime.fromisoformat(user_record.get('last_seen', start_time.isoformat()))
+        if last_seen.timestamp() > week_ago:
+            active_users.append(user_record['user_id'])
     
     stats_text = (
         f"📈 *סטטיסטיקות מפורטות*\n\n"
@@ -262,124 +317,119 @@ def admin_stats(update, context):
         f"• הודעות שקיבל: {bot_stats['message_count']}\n"
         f"• פקודות /start: {bot_stats['start_count']}\n"
         f"• משתמשים ייחודיים: {len(bot_stats['users'])}\n"
-        f"• שגיאות שליחה: {bot_stats['errors']}\n\n"
+        f"• משתמשים פעילים (7 ימים): {len(active_users)}\n"
+        f"• הודעות שמורות: {len(messages_db)}\n\n"
         f"*שידורים אחרונים:*\n"
     )
     
     # Add broadcast history
-    if broadcast_messages:
-        for i, msg in enumerate(broadcast_messages[-5:], 1):
-            stats_text += f"{i}. {msg['text'][:30]}... ({msg['timestamp']})\n"
+    if broadcasts_db:
+        for i, broadcast in enumerate(broadcasts_db[-3:], 1):
+            timestamp = datetime.fromisoformat(broadcast['timestamp']).strftime('%d/%m %H:%M')
+            stats_text += f"{i}. {broadcast['text'][:30]}... ({timestamp})\n"
     else:
         stats_text += "אין שידורים עדיין\n"
     
-    stats_text += f"\n*משתמשים אחרונים (10):*\n"
-    
-    # Add users list
-    for i, user_id in enumerate(users_list, 1):
-        stats_text += f"{i}. `{user_id}`\n"
-    
-    if len(bot_stats['users']) > 10:
-        stats_text += f"... ועוד {len(bot_stats['users']) - 10} משתמשים\n"
-    
     stats_text += f"\n*Webhook:* {WEBHOOK_URL or 'לא מוגדר'}"
     
-    safe_send_message(update.effective_chat.id, stats_text, parse_mode='Markdown')
+    update.message.reply_text(stats_text, parse_mode='Markdown')
 
 def broadcast_command(update, context):
     """Handle /broadcast command - Send message to all users"""
     user = update.effective_user
     
     if not is_admin(user.id):
-        safe_send_message(update.effective_chat.id, "❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
+        update.message.reply_text("❌ *גישה נדחית!* רק מנהל יכול להשתמש בפקודה זו.", parse_mode='Markdown')
         return
     
-    # Get broadcast message
-    message = ' '.join(context.args) if context.args else ''
-    
-    if not message:
-        safe_send_message(
-            update.effective_chat.id,
+    # Get broadcast message from command arguments
+    if not context.args:
+        update.message.reply_text(
             "❌ *שימוש:* /broadcast <הודעה>\n\n"
             "*דוגמה:*\n"
-            "/broadcast הודעה חשובה לכולם!\n\n"
-            "⚠️ *אזהרה:* ההודעה תישלח לכל המשתמשים שהשתמשו בבוט.",
+            "/broadcast שלום לכולם! זו הודעה חשובה.\n\n"
+            "⚠️ *הערה:* ההודעה תישלח לכל המשתמשים שהשתמשו בבוט.",
             parse_mode='Markdown'
         )
         return
     
+    message = ' '.join(context.args)
     log_message(update, 'broadcast')
     
-    # Store broadcast message
-    broadcast_data = {
+    # Send confirmation to admin
+    update.message.reply_text(
+        f"📢 *מתחיל שידור לכולם...*\n\n"
+        f"*הודעה:* {message}\n"
+        f"*מספר נמענים:* {len(users_db)}\n"
+        f"⏳ שולח...",
+        parse_mode='Markdown'
+    )
+    
+    # Record broadcast
+    broadcast_record = {
+        'id': len(broadcasts_db) + 1,
+        'admin_id': user.id,
+        'admin_name': user.first_name,
         'text': message,
-        'from_admin': user.id,
         'timestamp': datetime.now().isoformat(),
         'sent_to': 0,
         'failed': 0
     }
     
-    # Send to admin first
-    safe_send_message(
-        update.effective_chat.id,
-        f"📢 *מתחיל שידור לכולם:*\n\n{message}\n\n"
-        f"👥 *משתמשים:* {len(bot_stats['users'])}\n"
-        f"⏳ *שולח...*",
+    # Send to all users
+    sent_count = 0
+    failed_count = 0
+    
+    for user_record in users_db:
+        try:
+            # Don't send to self
+            if user_record['user_id'] == user.id:
+                continue
+                
+            bot.send_message(
+                chat_id=user_record['user_id'],
+                text=f"📢 *הודעה מהמנהל:*\n\n{message}",
+                parse_mode='Markdown'
+            )
+            sent_count += 1
+            
+            # Small delay to avoid rate limits
+            time.sleep(0.1)
+            
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to {user_record['user_id']}: {e}")
+            failed_count += 1
+    
+    # Update broadcast record
+    broadcast_record['sent_to'] = sent_count
+    broadcast_record['failed'] = failed_count
+    broadcasts_db.append(broadcast_record)
+    save_json(BROADCASTS_FILE, broadcasts_db)
+    
+    # Send final report
+    update.message.reply_text(
+        f"✅ *שידור הושלם!*\n\n"
+        f"📊 *תוצאות:*\n"
+        f"• ✅ נשלח בהצלחה: {sent_count}\n"
+        f"• ❌ נכשל: {failed_count}\n"
+        f"• 👥 סה״כ נמענים: {len(users_db)}\n"
+        f"• 📝 *הודעה:* {message[:50]}...",
         parse_mode='Markdown'
     )
-    
-    # Send to all users
-    success_count = 0
-    fail_count = 0
-    
-    for user_id in bot_stats['users']:
-        if str(user_id) == ADMIN_USER_ID:
-            continue  # Skip admin
-        
-        if safe_send_message(user_id, f"📢 *הודעה מהמנהל:*\n\n{message}", parse_mode='Markdown'):
-            success_count += 1
-        else:
-            fail_count += 1
-        
-        # Small delay to avoid rate limits
-        time.sleep(0.1)
-    
-    # Update broadcast data
-    broadcast_data['sent_to'] = success_count
-    broadcast_data['failed'] = fail_count
-    broadcast_messages.append(broadcast_data)
-    
-    # Keep only last 20 broadcasts
-    if len(broadcast_messages) > 20:
-        broadcast_messages.pop(0)
-    
-    # Send report to admin
-    report_text = (
-        f"✅ *שידור הושלם!*\n\n"
-        f"📝 *הודעה:* {message[:50]}...\n\n"
-        f"📊 *תוצאות:*\n"
-        f"• ✅ נשלח בהצלחה: {success_count}\n"
-        f"• ❌ נכשל: {fail_count}\n"
-        f"• 👥 סה״כ נמענים: {len(bot_stats['users'])}\n"
-        f"• ⏱️ זמן: {datetime.now().strftime('%H:%M:%S')}"
-    )
-    
-    safe_send_message(update.effective_chat.id, report_text, parse_mode='Markdown')
 
 def echo(update, context):
-    """Echo user messages (not commands)"""
+    """Echo user messages"""
     log_message(update, 'echo')
     text = update.message.text
     
     # Simple response with Markdown formatting
     response = f"📝 *אתה כתבת:*\n`{text}`"
-    safe_send_message(update.effective_chat.id, response, parse_mode='Markdown')
+    update.message.reply_text(response, parse_mode='Markdown')
 
 def unknown(update, context):
     """Handle unknown commands"""
     log_message(update, 'unknown')
-    safe_send_message(
-        update.effective_chat.id,
+    update.message.reply_text(
         "❓ *פקודה לא מזוהה*\n"
         "השתמש ב /help כדי לראות את רשימת הפקודות.",
         parse_mode='Markdown'
@@ -392,12 +442,11 @@ dispatcher.add_handler(CommandHandler("help", help_command))
 dispatcher.add_handler(CommandHandler("id", show_id))
 dispatcher.add_handler(CommandHandler("info", bot_info))
 dispatcher.add_handler(CommandHandler("ping", ping))
-dispatcher.add_handler(CommandHandler("echo", echo_command, pass_args=True))
 dispatcher.add_handler(CommandHandler("admin", admin_panel))
 dispatcher.add_handler(CommandHandler("stats", admin_stats))
 dispatcher.add_handler(CommandHandler("broadcast", broadcast_command, pass_args=True))
 
-# Message handler for non-command text
+# Message handler
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, echo))
 
 # Unknown command handler (must be last)
@@ -416,35 +465,31 @@ def home():
             "messages": bot_stats['message_count'],
             "unique_users": len(bot_stats['users']),
             "starts": bot_stats['start_count'],
-            "errors": bot_stats['errors']
+            "stored_messages": len(messages_db),
+            "stored_users": len(users_db),
+            "broadcasts": len(broadcasts_db)
         },
         "webhook": WEBHOOK_URL if WEBHOOK_URL else "not_configured",
         "admin_configured": bool(ADMIN_USER_ID),
-        "broadcasts_sent": len(broadcast_messages)
+        "data_storage": "active"
     })
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Telegram webhook endpoint"""
-    # Debug: Log the request
-    logger.info(f"🌐 Webhook received from {request.remote_addr}")
-    
     if WEBHOOK_SECRET:
         secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
         if secret != WEBHOOK_SECRET:
-            logger.warning(f"Unauthorized webhook attempt. Expected: {WEBHOOK_SECRET}, Got: {secret}")
+            logger.warning("Unauthorized webhook attempt")
             return 'Unauthorized', 403
     
     try:
         data = request.get_json()
         
         # Log webhook request
-        if 'message' in data and 'text' in data['message']:
-            text = data['message']['text']
-            user_id = data['message']['from']['id']
-            logger.info(f"📨 Webhook: User {user_id} sent: '{text}'")
-        else:
-            logger.info(f"📨 Webhook: Update received (no text)")
+        if 'message' in data:
+            msg = data['message']
+            logger.info(f"📨 Webhook: {msg.get('text', '')[:50]}...")
         
         update = Update.de_json(data, bot)
         dispatcher.process_update(update)
@@ -452,7 +497,6 @@ def webhook():
         return 'OK', 200
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
-        bot_stats['errors'] += 1
         return 'Error', 500
 
 @app.route('/health')
@@ -465,69 +509,68 @@ def health():
         "stats": {
             "messages": bot_stats['message_count'],
             "users": len(bot_stats['users']),
-            "uptime": bot_stats['start_time'],
-            "errors": bot_stats['errors']
+            "uptime": bot_stats['start_time']
+        },
+        "storage": {
+            "users": len(users_db),
+            "messages": len(messages_db),
+            "broadcasts": len(broadcasts_db)
         }
     })
 
-@app.route('/admin/web', methods=['GET'])
-def admin_web():
-    """Web admin panel (simple)"""
+@app.route('/admin/data', methods=['GET'])
+def admin_data():
+    """Admin data endpoint (requires secret)"""
     auth = request.args.get('auth')
     if auth != WEBHOOK_SECRET:
         return jsonify({"error": "Unauthorized"}), 403
     
     return jsonify({
-        "stats": bot_stats,
-        "users_count": len(bot_stats['users']),
-        "users_list": list(bot_stats['users'])[:50],
-        "uptime": bot_stats['start_time'],
-        "current_time": datetime.now().isoformat(),
-        "webhook_url": WEBHOOK_URL,
-        "broadcasts": broadcast_messages[-10:] if broadcast_messages else []
+        "users": users_db,
+        "messages_count": len(messages_db),
+        "broadcasts": broadcasts_db,
+        "stats": bot_stats
     })
+
+@app.route('/admin/backup', methods=['GET'])
+def admin_backup():
+    """Create backup of all data"""
+    auth = request.args.get('auth')
+    if auth != WEBHOOK_SECRET:
+        return jsonify({"error": "Unauthorized"}), 403
+    
+    backup_data = {
+        "timestamp": datetime.now().isoformat(),
+        "users": users_db,
+        "messages": messages_db,
+        "broadcasts": broadcasts_db,
+        "stats": bot_stats
+    }
+    
+    return jsonify(backup_data)
 
 # ==================== INITIALIZATION ====================
 def setup_webhook():
     """Setup webhook if URL is provided"""
-    if WEBHOOK_URL and not WEBHOOK_URL.endswith('/webhook'):
-        corrected_url = WEBHOOK_URL.rstrip('/') + '/webhook'
-    else:
-        corrected_url = WEBHOOK_URL
-    
-    if corrected_url:
+    if WEBHOOK_URL:
         try:
-            # Try to set webhook with the correct URL
-            bot.set_webhook(url=corrected_url)
-            logger.info(f"✅ Webhook configured: {corrected_url}")
-            
-            # Also log the current webhook info for debugging
-            try:
-                info = bot.get_webhook_info()
-                logger.info(f"📋 Webhook info: {info.url}, Pending: {info.pending_update_count}")
-            except:
-                pass
-                
+            # Ensure webhook URL ends with /webhook
+            webhook_url = WEBHOOK_URL.rstrip('/') + '/webhook'
+            bot.set_webhook(url=webhook_url)
+            logger.info(f"✅ Webhook configured: {webhook_url}")
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup failed: {e}")
 
 if __name__ == '__main__':
     logger.info("🚀 Starting Telegram Bot")
     
-    # Log bot info
-    try:
-        bot_info = bot.get_me()
-        logger.info(f"🤖 Bot: @{bot_info.username} (ID: {bot_info.id})")
-    except Exception as e:
-        logger.error(f"Failed to get bot info: {e}")
-    
-    logger.info(f"👑 Admin ID: {ADMIN_USER_ID or 'Not configured'}")
-    logger.info(f"🔐 Webhook Secret: {'Set' if WEBHOOK_SECRET else 'Not set'}")
-    logger.info(f"🌐 Webhook URL: {WEBHOOK_URL or 'None'}")
-    
     # Setup webhook
     setup_webhook()
     
+    # Log startup info
+    logger.info(f"🤖 Bot: @{bot.get_me().username}")
+    logger.info(f"👑 Admin ID: {ADMIN_USER_ID or 'Not configured'}")
+    logger.info(f"💾 Storage: {len(users_db)} users, {len(messages_db)} messages loaded")
     logger.info(f"🌐 Flask starting on port {PORT}")
     
     # Start Flask
