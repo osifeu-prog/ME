@@ -6,7 +6,8 @@ import time
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Bot, Update, ParseMode, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, RegexHandler
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.utils.helpers import escape_markdown
 
 # ==================== CONFIGURATION ====================
 logging.basicConfig(
@@ -278,6 +279,16 @@ def log_message(update, command=None):
     
     logger.info(f"📝 {chat.type.capitalize()} message from {user.first_name}: {message.text[:50] if message.text else 'No text'}")
 
+def escape_markdown_v2(text):
+    """Escape special characters for MarkdownV2"""
+    if not text:
+        return ""
+    # Escape special characters for Telegram MarkdownV2
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 # ==================== BOT COMMANDS ====================
 def start(update, context):
     """Handle /start command"""
@@ -338,29 +349,29 @@ def help_command(update, context):
     
     if chat.type == 'private':
         help_text = (
-            f"📚 *רשימת פקודות מלאה - {BOT_NAME}*\n\n"
-            f"🔹 *פקודות בסיסיות:*\n"
-            f"/start - הודעת פתיחה\n"
-            f"/help - רשימת פקודות זו\n"
-            f"/menu - תפריט כפתורים\n"
-            f"/about - מידע על הבוט\n"
-            f"/botinfo - פרטי הבוט (ID, שם)\n"
-            f"/id - הצג את ה-ID שלך\n"
-            f"/info - סטטיסטיקות בוט\n"
-            f"/ping - בדיקת חיים\n\n"
-            f"👑 *פקודות מנהל:*\n"
-            f"/admin - לוח בקרה\n"
-            f"/stats - סטטיסטיקות מפורטות\n"
-            f"/broadcast - שידור לכולם\n"
-            f"/users - ניהול משתמשים\n\n"
-            f"💡 *בקבוצות:*\n"
+            "📚 *רשימת פקודות מלאה*\n\n"
+            "🔹 *פקודות בסיסיות:*\n"
+            "/start - הודעת פתיחה\n"
+            "/help - רשימת פקודות זו\n"
+            "/menu - תפריט כפתורים\n"
+            "/about - מידע על הבוט\n"
+            "/botinfo - פרטי הבוט (ID, שם)\n"
+            "/id - הצג את ה-ID שלך\n"
+            "/info - סטטיסטיקות בוט\n"
+            "/ping - בדיקת חיים\n\n"
+            "👑 *פקודות מנהל:*\n"
+            "/admin - לוח בקרה\n"
+            "/stats - סטטיסטיקות מפורטות\n"
+            "/broadcast - שידור לכולם\n"
+            "/users - ניהול משתמשים\n\n"
+            "💡 *בקבוצות:*\n"
             f"הזכירו אותי עם @{BOT_USERNAME}\n"
-            f"או השתמשו בפקודות ישירות\n\n"
-            f"⚙️ *פיתוח עתידי:*\n"
-            f"• אינטגרציה עם מאגרי מידע\n"
-            f"• הודעות מתוזמנות אוטומטיות\n"
-            f"• ניתוח טקסטים מתקדם\n"
-            f"• חיבור ל-APIs חיצוניים"
+            "או השתמשו בפקודות ישירות\n\n"
+            "⚙️ *פיתוח עתידי:*\n"
+            "• אינטגרציה עם מאגרי מידע\n"
+            "• הודעות מתוזמנות אוטומטיות\n"
+            "• ניתוח טקסטים מתקדם\n"
+            "• חיבור ל-APIs חיצוניים"
         )
     else:
         help_text = (
@@ -377,7 +388,12 @@ def help_command(update, context):
             f"💡 *טיפ:* השתמשו בכפתורים למטה לנוחות!"
         )
     
-    update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    try:
+        update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error sending help: {e}")
+        # Fallback without markdown
+        update.message.reply_text(help_text.replace('*', '').replace('`', ''), parse_mode=ParseMode.HTML)
 
 def about_command(update, context):
     """Handle /about command - Information about bot's purpose"""
@@ -861,6 +877,34 @@ def handle_text(update, context):
     elif text == "🏠 לתפריט הראשי":
         menu_command(update, context)
     
+    elif text == "⚙️ הגדרות" and is_admin(user.id):
+        settings_text = (
+            f"⚙️ *הגדרות הבוט - {BOT_NAME}*\n\n"
+            f"🔧 *פעולות זמינות:*\n"
+            f"• שינוי שם הבוט (מתבצע ב @BotFather)\n"
+            f"• שינוי תמונה (מתבצע ב @BotFather)\n"
+            f"• הגדרת Webhook: {'מוגדר ✅' if WEBHOOK_URL else 'לא מוגדר'}\n"
+            f"• ID מנהל: {ADMIN_USER_ID}\n"
+            f"• ID הבוט: `{BOT_ID}`\n\n"
+            f"📊 *מאגר נתונים:*\n"
+            f"• משתמשים: {len(users_db)}\n"
+            f"• קבוצות: {len(groups_db)}\n"
+            f"• הודעות: {len(messages_db)}\n"
+            f"• שידורים: {len(broadcasts_db)}\n\n"
+            f"💡 *עדכון הגדרות:*\n"
+            f"הגדרות סביבה מתבצעות ב-Railway"
+        )
+        update.message.reply_text(settings_text, parse_mode=ParseMode.MARKDOWN)
+    
+    elif text == "🔄 אתחול בוט" and is_admin(user.id):
+        update.message.reply_text(
+            "♻️ *אתחול בוט*\n\n"
+            "פונקציה זו תשוחרר בגרסאות עתידיות.\n"
+            "לעת עתה, ניתן לבצע אתחול ידני ב-Railway.\n\n"
+            f"🤖 *ID הבוט:* `{BOT_ID}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
     # Handle group mentions
     elif BOT_USERNAME and f"@{BOT_USERNAME}" in message.text:
         mentioned_text = message.text.lower()
@@ -931,6 +975,22 @@ def unknown(update, context):
         parse_mode=ParseMode.MARKDOWN
     )
 
+def error_handler(update, context):
+    """Handle errors in the bot"""
+    logger.error(f"Update {update} caused error {context.error}")
+    
+    try:
+        # Try to send error message to user
+        if update and update.effective_chat:
+            update.effective_chat.send_message(
+                f"❌ *שגיאה בבוט:*\n\n"
+                f"התרחשה שגיאה טכנית. אנא נסה שוב מאוחר יותר.\n\n"
+                f"🤖 *ID הבוט:* `{BOT_ID}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
+
 # ==================== SETUP HANDLERS ====================
 # Command handlers
 dispatcher.add_handler(CommandHandler("start", start))
@@ -951,6 +1011,9 @@ dispatcher.add_handler(MessageHandler(Filters.text, handle_text))
 
 # Unknown command handler (must be last)
 dispatcher.add_handler(MessageHandler(Filters.command, unknown))
+
+# Add error handler
+dispatcher.add_error_handler(error_handler)
 
 # ==================== FLASK ROUTES ====================
 @app.route('/')
