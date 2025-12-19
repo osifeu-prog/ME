@@ -61,7 +61,561 @@ GROUPS_FILE = os.path.join(DATA_DIR, "groups.json")
 
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)
+# ==================== EVOLUTIONARY DNA CORE ====================
+class BotDNA:
+    """מערכת DNA אבולוציונית מובנית בתוך הבוט"""
+    
+    def __init__(self):
+        self.dna_path = os.path.join(DATA_DIR, "evolution", "dna.json")
+        self.modules_path = os.path.join(DATA_DIR, "evolution", "modules")
+        self.archive_path = os.path.join(DATA_DIR, "evolution", "archive")
+        self.mutations_path = os.path.join(DATA_DIR, "evolution", "mutations")
+        self.knowledge_path = os.path.join(DATA_DIR, "knowledge")
+        
+        # צור תיקיות אם לא קיימות
+        for path in [self.modules_path, self.archive_path, self.mutations_path, self.knowledge_path]:
+            os.makedirs(path, exist_ok=True)
+        
+        # טען או צור DNA
+        self.dna = self._load_or_create_dna()
+        
+    def _load_or_create_dna(self):
+        """טען DNA או צור חדש"""
+        if os.path.exists(self.dna_path):
+            return load_json(self.dna_path, {})
+        
+        # DNA בסיסי - הגנום הראשוני
+        base_dna = {
+            "bot_id": BOT_ID,
+            "bot_name": BOT_NAME,
+            "creation_date": datetime.now().isoformat(),
+            "lineage": ["primordial_bot_v1"],
+            "generation": 1,
+            "modules": {},
+            "mutations": [],
+            "fitness_score": 0,
+            "memory": {
+                "lessons_learned": [],
+                "patterns_discovered": [],
+                "optimizations_applied": []
+            }
+        }
+        
+        save_json(self.dna_path, base_dna)
+        logger.info(f"🧬 Created base DNA for {BOT_NAME}")
+        return base_dna
+    
+    def register_module(self, module_name, module_type, functions=None, parent=None):
+        """רישום מודול חדש ב-DNA"""
+        module_id = f"mod_{int(time.time())}_{len(self.dna['modules'])}"
+        
+        module_data = {
+            "id": module_id,
+            "name": module_name,
+            "type": module_type,
+            "parent": parent,
+            "birth_date": datetime.now().isoformat(),
+            "functions": functions or [],
+            "lineage": self._get_lineage(parent),
+            "status": "active",
+            "usage_count": 0,
+            "last_used": datetime.now().isoformat()
+        }
+        
+        # הוסף ל-DNA
+        self.dna["modules"][module_id] = module_data
+        
+        # עדכן דור
+        generation = len(module_data["lineage"]) + 1
+        if generation > self.dna["generation"]:
+            self.dna["generation"] = generation
+        
+        self._save_dna()
+        
+        # צור קובץ מודול נפרד
+        self._create_module_file(module_id, module_data)
+        
+        logger.info(f"🧬 Registered module: {module_name} ({module_id})")
+        return module_id
+    
+    def record_mutation(self, module_id, mutation_type, description, impact="low", code_diff=""):
+        """רישום מוטציה (שינוי) במודול"""
+        mutation_id = f"mut_{int(time.time())}"
+        
+        mutation = {
+            "id": mutation_id,
+            "module_id": module_id,
+            "type": mutation_type,  # 'feature_add', 'bug_fix', 'optimization', 'integration'
+            "description": description,
+            "impact": impact,  # low, medium, high, critical
+            "code_diff": code_diff[:1000],  # שמור את השינוי בקוד
+            "timestamp": datetime.now().isoformat(),
+            "bot_version": self.dna.get("generation", 1),
+            "before_state": self._capture_module_state(module_id)
+        }
+        
+        # שמור מוטציה
+        mutation_file = os.path.join(self.mutations_path, f"{mutation_id}.json")
+        save_json(mutation_file, mutation)
+        
+        # הוסף ל-DNA
+        self.dna["mutations"].append({
+            "id": mutation_id,
+            "module_id": module_id,
+            "type": mutation_type,
+            "timestamp": mutation["timestamp"]
+        })
+        
+        # עדכן score התאמה (fitness)
+        self._update_fitness_score(mutation_type, impact)
+        
+        self._save_dna()
+        self._log_growth(f"🔄 Mutation recorded: {mutation_type} on {module_id}")
+        
+        return mutation_id
+    
+    def evolve_from_pattern(self, pattern_data):
+        """אבולוציה אוטומטית מדפוסים מתגלים"""
+        # ניתוח הדפוס
+        pattern_type = pattern_data.get("type")
+        frequency = pattern_data.get("frequency", 1)
+        confidence = pattern_data.get("confidence", 0)
+        
+        if frequency < 3 or confidence < 0.7:  # סף מינימלי
+            return None, "Pattern too weak for evolution"
+        
+        # חפש מודול אב מתאים
+        parent_module = self._find_parent_for_pattern(pattern_type)
+        
+        # צור מודול חדש
+        new_module_name = f"auto_{pattern_type}_{int(time.time())}"
+        
+        module_id = self.register_module(
+            module_name=new_module_name,
+            module_type=pattern_type,
+            functions=self._generate_functions_from_pattern(pattern_data),
+            parent=parent_module
+        )
+        
+        # הוסף לידע המצטבר
+        self._add_to_knowledge("patterns_discovered", {
+            "pattern": pattern_type,
+            "evolved_into": module_id,
+            "confidence": confidence,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        logger.info(f"🧬 Evolved from pattern: {pattern_type} -> {module_id}")
+        
+        return module_id, f"Evolved module {new_module_name} from pattern"
+    
+    def get_evolution_tree(self):
+        """קבלת עץ האבולוציה המלא"""
+        tree = {
+            "root": {
+                "id": "primordial",
+                "name": "Base Bot",
+                "generation": 0
+            },
+            "branches": [],
+            "total_modules": len(self.dna["modules"]),
+            "total_mutations": len(self.dna["mutations"]),
+            "fitness_score": self.dna.get("fitness_score", 0),
+            "generation": self.dna.get("generation", 1)
+        }
+        
+        # בנה את הענפים
+        for module_id, module in self.dna["modules"].items():
+            branch = {
+                "id": module_id,
+                "name": module["name"],
+                "type": module["type"],
+                "parent": module["parent"],
+                "generation": len(module["lineage"]),
+                "status": module["status"],
+                "mutations": [
+                    mut for mut in self.dna["mutations"] 
+                    if mut.get("module_id") == module_id
+                ]
+            }
+            tree["branches"].append(branch)
+        
+        return tree
 
+# ==================== INTEGRATION WITH EXISTING BOT ====================
+
+# יצירת מופע DNA גלובלי (מוסיפים אחרי הגדרת הבוט)
+bot_dna = BotDNA()
+
+# רישום המודולים הקיימים בבוט (מוסיפים אחרי יצירת bot_dna)
+def register_existing_modules():
+    """רישום כל המודולים הקיימים ב-DNA"""
+    
+    # המודול הבסיסי - הליבה
+    bot_dna.register_module(
+        module_name="core_bot",
+        module_type="core",
+        functions=["start", "help", "menu", "admin", "stats"],
+        parent=None
+    )
+    
+    # מודול ניהול משתמשים
+    bot_dna.register_module(
+        module_name="user_management",
+        module_type="management",
+        functions=["get_or_create_user", "register_group", "log_message"],
+        parent="core_bot"
+    )
+    
+    # מודול מסחר (אם קיים)
+    if 'signals_db' in globals():
+        bot_dna.register_module(
+            module_name="trading_signals",
+            module_type="trading",
+            functions=["signals_command", "addsignal_command", "report_command"],
+            parent="core_bot"
+        )
+    
+    # מודול webhooks
+    bot_dna.register_module(
+        module_name="webhook_handler",
+        module_type="integration",
+        functions=["webhook", "tradingview_alert"],
+        parent="core_bot"
+    )
+    
+    logger.info("🧬 Registered existing modules in DNA")
+
+# ==================== NEW COMMANDS FOR EVOLUTION ====================
+
+def dna_command(update, context):
+    """הצגת ה-DNA של הבוט"""
+    log_message(update, 'dna')
+    
+    tree = bot_dna.get_evolution_tree()
+    
+    dna_text = (
+        f"🧬 *DNA של {BOT_NAME}*\n\n"
+        f"*פרטים גנטיים:*\n"
+        f"• 🆔 ID: `{tree['root']['id']}`\n"
+        f"• 🏷️ שם: {BOT_NAME}\n"
+        f"• 🧬 דור: {tree['generation']}\n"
+        f"• 📊 דירוג התאמה: {tree['fitness_score']}/100\n\n"
+        f"*מודולים פעילים:*\n"
+    )
+    
+    # הצג 5 מודולים אחרונים
+    active_modules = [m for m in tree['branches'] if m['status'] == 'active']
+    for module in active_modules[-5:]:
+        dna_text += f"• {module['name']} ({module['type']}) - דור {module['generation']}\n"
+    
+    dna_text += f"\n*סטטיסטיקות:*\n"
+    dna_text += f"• מודולים: {tree['total_modules']}\n"
+    dna_text += f"• מוטציות: {tree['total_mutations']}\n"
+    dna_text += f"• ענפים: {len(tree['branches'])}\n\n"
+    dna_text += f"_הבוט שלך מתפתח בקצב {tree['fitness_score']/10:.1f}x_"
+    
+    update.message.reply_text(dna_text, parse_mode=ParseMode.MARKDOWN)
+
+def evolve_command(update, context):
+    """הפעלת אבולוציה מבוקרת"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'evolve')
+    
+    # ניתוח פקודה
+    if not context.args:
+        # מצב אינטראקטיבי
+        help_text = (
+            "🔄 *אבולוציה מבוקרת*\n\n"
+            "*שימושים:*\n"
+            "`/evolve pattern` - אבולוציה מדפוסים\n"
+            "`/evolve optimize` - אופטימיזציה אוטומטית\n"
+            "`/evolve merge` - מיזוג מודולים\n"
+            "`/evolve status` - סטטוס אבולוציה\n\n"
+            "*דוגמה:*\n"
+            "`/evolve pattern`"
+        )
+        update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    action = context.args[0].lower()
+    
+    if action == "pattern":
+        # חפש דפוסים להיווצרות מוטציה
+        patterns = analyze_usage_patterns()
+        
+        if not patterns:
+            update.message.reply_text("📭 *אין דפוסים חזקים מספיק לאבולוציה*", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        # בחר את הדפוס החזק ביותר
+        strongest_pattern = max(patterns, key=lambda x: x.get('confidence', 0))
+        
+        # הפעל אבולוציה
+        module_id, result = bot_dna.evolve_from_pattern(strongest_pattern)
+        
+        if module_id:
+            update.message.reply_text(
+                f"✅ *אבולוציה התרחשה!*\n\n"
+                f"*נוצר מודול חדש:* {module_id}\n"
+                f"*מדפוס:* {strongest_pattern['type']}\n"
+                f"*בטחון:* {strongest_pattern['confidence']*100:.1f}%\n\n"
+                f"_המערכת מתפתחת..._",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # שליחה למנהל עם פרטים נוספים
+            if ADMIN_USER_ID and str(user.id) != ADMIN_USER_ID:
+                try:
+                    bot.send_message(
+                        chat_id=ADMIN_USER_ID,
+                        text=f"🧬 *אבולוציה בוצעה!*\n\n"
+                             f"משתמש: {user.first_name}\n"
+                             f"פעולה: {action}\n"
+                             f"מודול חדש: {module_id}\n"
+                             f"דפוס: {strongest_pattern['type']}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except:
+                    pass
+        else:
+            update.message.reply_text(f"❌ *אבולוציה נכשלה:* {result}", parse_mode=ParseMode.MARKDOWN)
+    
+    elif action == "status":
+        # הצג סטטוס אבולוציה
+        tree = bot_dna.get_evolution_tree()
+        
+        status_text = (
+            f"📊 *סטטוס אבולוציה - {BOT_NAME}*\n\n"
+            f"*דור נוכחי:* {tree['generation']}\n"
+            f"*מודולים חיים:* {len([m for m in tree['branches'] if m['status'] == 'active'])}\n"
+            f"*מוטציות אחרונות:*\n"
+        )
+        
+        # הצג 3 מוטציות אחרונות
+        recent_mutations = bot_dna.dna.get('mutations', [])[-3:]
+        for mut in reversed(recent_mutations):
+            mut_time = datetime.fromisoformat(mut['timestamp']).strftime('%d/%m %H:%M')
+            status_text += f"• {mut['type']} ({mut_time})\n"
+        
+        status_text += f"\n*דירוג התאמה:* {tree['fitness_score']}/100\n"
+        
+        if tree['fitness_score'] > 70:
+            status_text += "🌟 *בוט מאוד מתאים לסביבה!*\n"
+        elif tree['fitness_score'] > 40:
+            status_text += "📈 *בוט במגמת שיפור*\n"
+        else:
+            status_text += "🌱 *בוט צעיר, עדיין מתפתח*\n"
+        
+        update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+
+def lineage_command(update, context):
+    """הצגת שושלת היוחסין של מודול"""
+    log_message(update, 'lineage')
+    
+    if not context.args:
+        update.message.reply_text(
+            "🌳 *שושלת יוחסין*\n\n"
+            "*שימוש:* `/lineage module_id`\n\n"
+            "*לדוגמה:* `/lineage trading_signals`\n\n"
+            "*למציאת module_id:* השתמש ב`/dna`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    module_id = context.args[0]
+    module = bot_dna.dna['modules'].get(module_id)
+    
+    if not module:
+        update.message.reply_text(
+            f"❌ *מודול לא נמצא:* `{module_id}`\n\n"
+            f"נסה `/dna` לראות את רשימת המודולים.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    lineage = module.get('lineage', [])
+    
+    lineage_text = f"🌳 *שושלת: {module['name']}*\n\n"
+    
+    for i, ancestor in enumerate(reversed(lineage)):
+        indent = "  " * i
+        if ancestor == "primordial_bot_v1":
+            lineage_text += f"{indent}🦠 {ancestor}\n"
+        elif ancestor == "core_bot":
+            lineage_text += f"{indent}💙 {ancestor}\n"
+        else:
+            # נסה למצוא את שם המודול
+            ancestor_name = ancestor
+            for mod_id, mod in bot_dna.dna['modules'].items():
+                if mod_id == ancestor:
+                    ancestor_name = mod['name']
+                    break
+            
+            if i == len(lineage) - 1:
+                lineage_text += f"{indent}👤 {ancestor_name} (הורה ישיר)\n"
+            else:
+                lineage_text += f"{indent}📜 {ancestor_name}\n"
+    
+    # הוסף את המודול הנוכחי
+    current_indent = "  " * len(lineage)
+    lineage_text += f"{current_indent}✨ **{module['name']}** (נוכחי)\n\n"
+    
+    # הוסף מידע על מוטציות
+    module_mutations = [m for m in bot_dna.dna['mutations'] if m.get('module_id') == module_id]
+    
+    if module_mutations:
+        lineage_text += f"*מוטציות במודול זה:* {len(module_mutations)}\n"
+        for mut in module_mutations[-3:]:
+            mut_time = datetime.fromisoformat(mut['timestamp']).strftime('%d/%m')
+            lineage_text += f"• {mut['type']} ({mut_time})\n"
+    
+    lineage_text += f"\n_דור: {len(lineage) + 1}, נוצר: {datetime.fromisoformat(module['birth_date']).strftime('%d/%m/%Y')}_"
+    
+    update.message.reply_text(lineage_text, parse_mode=ParseMode.MARKDOWN)
+
+# ==================== AUTO-EVOLUTION TRIGGERS ====================
+
+def analyze_usage_patterns():
+    """ניתוח דפוסי שימוש לאוטומציה של אבולוציה"""
+    patterns = []
+    
+    # ניתוח הודעות
+    if messages_db:
+        # חפש פקודות פופולריות
+        command_count = {}
+        for msg in messages_db[-1000:]:  # 1000 הודעות אחרונות
+            cmd = msg.get('command')
+            if cmd and cmd not in ['text', 'unknown']:
+                command_count[cmd] = command_count.get(cmd, 0) + 1
+        
+        # אם פקודה מסוימת מאוד פופולרית
+        for cmd, count in command_count.items():
+            if count > 50:  # סף
+                patterns.append({
+                    "type": f"command_{cmd}",
+                    "frequency": count,
+                    "confidence": min(count / 100, 1.0),
+                    "suggestion": f"Optimize {cmd} command"
+                })
+    
+    # ניתוח זמנים
+    if messages_db:
+        hour_counts = {}
+        for msg in messages_db:
+            hour = datetime.fromisoformat(msg['timestamp']).hour
+            hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        
+        peak_hour = max(hour_counts.items(), key=lambda x: x[1]) if hour_counts else (12, 0)
+        
+        if peak_hour[1] > 30:
+            patterns.append({
+                "type": "peak_hour_activity",
+                "frequency": peak_hour[1],
+                "confidence": min(peak_hour[1] / 50, 1.0),
+                "suggestion": f"Optimize for hour {peak_hour[0]}:00"
+            })
+    
+    return patterns
+
+def auto_evolve_check():
+    """בדיקה אוטומטית לצורך באבולוציה - רציף ברקע"""
+    patterns = analyze_usage_patterns()
+    
+    for pattern in patterns:
+        if pattern['confidence'] > 0.8:  # סף גבוה לאוטומציה
+            logger.info(f"🧬 Auto-evolution trigger: {pattern['type']} (confidence: {pattern['confidence']})")
+            
+            # הפעל אבולוציה אוטומטית רק לדברים קריטיים
+            if pattern['type'] == 'peak_hour_activity' and pattern['frequency'] > 100:
+                module_id, result = bot_dna.evolve_from_pattern(pattern)
+                if module_id:
+                    logger.info(f"🧬 Auto-evolved module: {module_id}")
+                    
+                    # הודע למנהל
+                    if ADMIN_USER_ID:
+                        try:
+                            bot.send_message(
+                                chat_id=ADMIN_USER_ID,
+                                text=f"🤖 *אבולוציה אוטומטית התרחשה!*\n\n"
+                                     f"*סיבה:* {pattern['type']}\n"
+                                     f"*תדירות:* {pattern['frequency']}\n"
+                                     f"*מודול חדש:* {module_id}\n\n"
+                                     f"_המערכת מתאימה את עצמה אוטומטית..._",
+                                parse_mode=ParseMode.MARKDOWN
+                            )
+                        except:
+                            pass
+
+# ==================== REGISTER NEW COMMANDS ====================
+
+# הוסף את הפקודות החדשות
+dispatcher.add_handler(CommandHandler("dna", dna_command))
+dispatcher.add_handler(CommandHandler("evolve", evolve_command))
+dispatcher.add_handler(CommandHandler("lineage", lineage_command))
+
+# ==================== INTEGRATION POINT - בסוף הקוד לפני ה-main ====================
+
+def initialize_evolution():
+    """אתחול מערכת האבולוציה"""
+    # רשום את המודולים הקיימים
+    register_existing_modules()
+    
+    # רשום את האבולוציה עצמה כמודול
+    bot_dna.register_module(
+        module_name="evolution_core",
+        module_type="meta",
+        functions=["register_module", "record_mutation", "evolve_from_pattern"],
+        parent="core_bot"
+    )
+    
+    # רשום את המודול הראשון כ"מוטציה" מבסיס
+    bot_dna.record_mutation(
+        module_id="core_bot",
+        mutation_type="foundation_built",
+        description="Base bot structure established",
+        impact="critical",
+        code_diff="Initial bot creation"
+    )
+    
+    # אם יש מודול מסחר, רשם אותו כמוטציה
+    if 'signals_db' in globals():
+        bot_dna.record_mutation(
+            module_id="core_bot",
+            mutation_type="feature_add",
+            description="Added trading signals module",
+            impact="high",
+            code_diff="Trading signals integration"
+        )
+    
+    logger.info("🧬 Evolutionary system initialized")
+
+# ==================== UPDATED MAIN STARTUP ====================
+
+if __name__ == '__main__':
+    logger.info("🚀 Starting Evolutionary Telegram Bot")
+    
+    # אתחול מערכת אבולוציה
+    initialize_evolution()
+    
+    # בדיקת אבולוציה אוטומטית
+    auto_evolve_check()
+    
+    # Setup webhook
+    setup_webhook()
+    
+    # Log startup info עם DNA
+    logger.info(f"🧬 Bot DNA: Generation {bot_dna.dna['generation']}, Modules: {len(bot_dna.dna['modules'])}, Fitness: {bot_dna.dna['fitness_score']}")
+    logger.info(f"🤖 Bot: {BOT_NAME} (@{BOT_USERNAME}, ID: {BOT_ID})")
+    logger.info(f"🌐 Flask starting on port {PORT}")
+    
+    # Start Flask
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
 # ==================== STORAGE FUNCTIONS ====================
 def load_json(filepath, default=None):
     """Load JSON file, return default if file doesn't exist"""
