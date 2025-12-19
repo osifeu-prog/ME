@@ -5,13 +5,14 @@ import re
 import time
 import random
 import requests
+import threading
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set, Union
 from flask import Flask, request, jsonify, Response
 from telegram import (
     Bot, Update, ParseMode, ReplyKeyboardMarkup, 
     KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup,
-    InlineKeyboardButton, ChatPermissions
+    InlineKeyboardButton, ChatPermissions, Chat, User
 )
 from telegram.ext import (
     Dispatcher, CommandHandler, MessageHandler, 
@@ -19,7 +20,7 @@ from telegram.ext import (
     ConversationHandler, Updater
 )
 from telegram.utils.helpers import escape_markdown
-import threading
+import traceback
 
 # ==================== CONFIGURATION ====================
 logging.basicConfig(
@@ -1848,6 +1849,798 @@ def get_task_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+def get_group_keyboard():
+    """Group keyboard"""
+    keyboard = [
+        [KeyboardButton(f"@{BOT_USERNAME} סטטוס"), KeyboardButton(f"@{BOT_USERNAME} עזרה")],
+        [KeyboardButton(f"@{BOT_USERNAME} quiz"), KeyboardButton(f"@{BOT_USERNAME} trivia")],
+        [KeyboardButton(f"@{BOT_USERNAME} מידע"), KeyboardButton(f"@{BOT_USERNAME} id")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+# ==================== MISSING FUNCTIONS ====================
+def show_id(update, context):
+    """Show user and chat ID"""
+    log_message(update, 'id')
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    response = (
+        f"🆔 *פרטי זיהוי:*\n\n"
+        f"👤 *משתמש:*\n"
+        f"• שם: {user.first_name}\n"
+        f"• מזהה: `{user.id}`\n"
+        f"• שם משתמש: @{user.username if user.username else 'ללא'}\n\n"
+        f"💬 *צ'אט:*\n"
+        f"• סוג: {chat.type}\n"
+        f"• מזהה: `{chat.id}`\n"
+    )
+    
+    if chat.type in ['group', 'supergroup', 'channel']:
+        response += f"• שם: {chat.title}\n"
+    
+    response += f"\n🤖 *מזהה הבוט שלי:* `{BOT_ID}`\n"
+    response += f"📍 *שם משתמש הבוט:* @{BOT_USERNAME}"
+    
+    update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+
+def about_command(update, context):
+    """Show information about the bot"""
+    log_message(update, 'about')
+    
+    dna_report = advanced_dna.get_evolution_report()
+    evolution_level = dna_report['progress']['level']
+    
+    about_text = (
+        f"🤖 *אודות {BOT_NAME}*\n\n"
+        f"🚀 *בוט Telegram מתקדם עם DNA אבולוציוני!*\n\n"
+        f"📖 *תיאור:*\n"
+        f"בוט חכם שמתפתח ומשתפר אוטומטית בהתבסס על אינטראקציות עם משתמשים. "
+        f"מערכת ה-DNA הפנימית שלו לומדת מדפוסי שימוש ויוצרת מוטציות לשיפור יכולות.\n\n"
+        f"🧬 *מצב אבולוציה:*\n"
+        f"• דור: {dna_report['dna_info']['generation']}\n"
+        f"• רמה: {evolution_level}\n"
+        f"• דירוג התאמה: {dna_report['dna_info']['fitness_score']}/100\n"
+        f"• מודולים פעילים: {dna_report['dna_info']['total_modules']}\n\n"
+        f"⚡ *תכונות עיקריות:*\n"
+        f"• 📈 ניתוח מניות ומידע פיננסי\n"
+        f"• 🎮 משחקי quiz וטריוויה\n"
+        f"• 📝 ניהול משימות ותזכורות\n"
+        f"• 📊 סטטיסטיקות מתקדמות\n"
+        f"• 🧠 למידה מדפוסי משתמשים\n\n"
+        f"🔄 *אבולוציה אוטומטית:*\n"
+        f"הבוט משתפר כל הזמן! כל אינטראקציה תורמת להתפתחות שלו.\n\n"
+        f"👨‍💻 *מפתח:* מערכת DNA אוטונומית\n"
+        f"📅 *נוצר:* {datetime.fromisoformat(dna_report['dna_info']['creation_date']).strftime('%d/%m/%Y')}\n\n"
+        f"📍 *גרסאות:*\n"
+        f"• Telegram Bot: python-telegram-bot\n"
+        f"• DNA System: v2.0\n"
+        f"• Evolution Engine: גנרטיבי\n\n"
+        f"🤝 *עקרונות:*\n"
+        f"• שקיפות - כל המידע זמין ב-/dna\n"
+        f"• למידה - שיפור מתמשך\n"
+        f"• שירות - עזרה למשתמשים\n\n"
+        f"📞 *תמיכה:*\n"
+        f"השתמש ב /help לרשימת פקודות\n"
+        f"השתמש ב /dna למידע אבולוציוני"
+    )
+    
+    update.message.reply_text(about_text, parse_mode=ParseMode.MARKDOWN)
+
+# ==================== ADMIN FUNCTIONS ====================
+def admin_stats(update, context):
+    """Show detailed admin statistics"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'admin_stats')
+    
+    stats = bot_stats.get_summary()
+    dna_report = advanced_dna.get_evolution_report()
+    
+    # Calculate detailed stats
+    hourly_activity = bot_stats.get_hourly_activity()
+    peak_hour = max(hourly_activity, key=lambda x: x['count']) if hourly_activity else {'hour': 0, 'count': 0}
+    
+    # User activity distribution
+    active_today = len([u for u in users_db 
+                       if u.get('last_seen') and 
+                       (datetime.now() - datetime.fromisoformat(u['last_seen'])).days < 1])
+    
+    active_week = len([u for u in users_db 
+                      if u.get('last_seen') and 
+                      (datetime.now() - datetime.fromisoformat(u['last_seen'])).days < 7])
+    
+    # Storage sizes
+    storage_info = {
+        'users': len(users_db),
+        'messages': len(messages_db),
+        'groups': len(groups_db),
+        'tasks': len(tasks_db),
+        'quiz_scores': sum(len(scores) for scores in quiz_scores_db.values())
+    }
+    
+    stats_text = (
+        f"📊 *סטטיסטיקות מתקדמות למנהל*\n\n"
+        f"📈 *פעילות כללית:*\n"
+        f"• ⏱️ זמן פעילות: {stats['uptime']}\n"
+        f"• 📨 הודעות שקיבל: {stats['total_messages']}\n"
+        f"• 📈 קצב הודעות: {stats['total_messages'] / max(1, bot_stats.stats['uptime_seconds'] / 3600):.1f}/שעה\n"
+        f"• 👥 משתמשים ייחודיים: {stats['total_users']}\n"
+        f"• 👥 משתמשים פעילים: {stats['active_users']}\n"
+        f"• 📅 פעילים היום: {active_today}\n"
+        f"• 📅 פעילים השבוע: {active_week}\n"
+        f"• 👥 קבוצות פעילות: {len(bot_stats.stats['groups'])}\n"
+        f"• 🚀 התחלות: {stats['start_count']}\n"
+        f"• 📝 פקודות: {stats['commands_count']}\n"
+        f"• ❌ שגיאות: {stats['errors_count']}\n\n"
+        
+        f"🕐 *פעילות לפי שעות:*\n"
+        f"• 🏆 שעת שיא: {peak_hour['hour']}:00 עם {peak_hour['count']} הודעות\n"
+        f"• 📊 ממוצע לשעה: {stats['total_messages'] / max(1, bot_stats.stats['uptime_seconds'] / 3600):.1f}\n\n"
+    )
+    
+    # Top commands
+    if stats['top_commands']:
+        stats_text += f"🏆 *פקודות פופולריות:*\n"
+        for cmd, count in stats['top_commands']:
+            cmd_name = {
+                'start': 'התחלה',
+                'help': 'עזרה',
+                'stock': 'מניות',
+                'quiz': 'Quiz',
+                'trivia': 'טריוויה',
+                'task': 'משימות',
+                'dna': 'DNA',
+                'menu': 'תפריט'
+            }.get(cmd, cmd)
+            stats_text += f"• {cmd_name}: {count}\n"
+        stats_text += "\n"
+    
+    # DNA evolution stats
+    stats_text += (
+        f"🧬 *סטטיסטיקות DNA:*\n"
+        f"• 🧬 דור: {dna_report['dna_info']['generation']}\n"
+        f"• ⭐ דירוג התאמה: {dna_report['dna_info']['fitness_score']}/100\n"
+        f"• 🔄 רמת התאמה: {dna_report['dna_info']['adaptation_level']:.2f}\n"
+        f"• 🧪 מוטציות: {dna_report['dna_info']['total_mutations']}\n"
+        f"• 🧩 מודולים: {dna_report['dna_info']['total_modules']}\n"
+        f"• 📈 התקדמות: {dna_report['progress']['percent']:.1f}%\n"
+        f"• 🏆 רמה: {dna_report['progress']['level']}\n\n"
+    )
+    
+    # Storage stats
+    stats_text += f"💾 *אחסון נתונים:*\n"
+    for key, value in storage_info.items():
+        hebrew_name = {
+            'users': 'משתמשים',
+            'messages': 'הודעות',
+            'groups': 'קבוצות',
+            'tasks': 'משימות',
+            'quiz_scores': 'תוצאות quiz'
+        }.get(key, key)
+        stats_text += f"• {hebrew_name}: {value}\n"
+    
+    # System health
+    error_rate = (stats['errors_count'] / max(1, stats['total_messages'])) * 100
+    health_emoji = "💚" if error_rate < 1 else "💛" if error_rate < 5 else "❤️"
+    
+    stats_text += f"\n🏥 *בריאות מערכת:* {health_emoji}\n"
+    stats_text += f"• שגיאות: {error_rate:.2f}%\n"
+    stats_text += f"• זיכרון משוער: {sum(len(str(item)) for item in users_db[:100]) // 1024}KB\n"
+    
+    update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+
+def broadcast_command(update, context):
+    """Broadcast message to all users"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'broadcast')
+    
+    if not context.args:
+        update.message.reply_text(
+            "📢 *שידור לכולם*\n\n"
+            "*שימוש:* `/broadcast <הודעה>`\n\n"
+            "*דוגמה:* `/broadcast שלום לכולם! עדכון חדש זמין.`\n\n"
+            "*אזהרה:* ההודעה תישלח לכל המשתמשים הרשומים!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    message = ' '.join(context.args)
+    total_users = len(users_db)
+    
+    if total_users == 0:
+        update.message.reply_text("ℹ️ *אין משתמשים רשומים לשידור.*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    # Confirm broadcast
+    confirm_text = (
+        f"⚠️ *אישור שידור*\n\n"
+        f"📝 *הודעה:*\n{message[:200]}...\n\n"
+        f"👥 *יעד:* {total_users} משתמשים\n\n"
+        f"❓ *האם לאשר שידור?*\n"
+        f"השתמש ב `/confirm_broadcast` לאישור או כל פקודה אחרת לביטול."
+    )
+    
+    # Store broadcast in context
+    context.user_data['pending_broadcast'] = {
+        'message': message,
+        'timestamp': datetime.now().isoformat(),
+        'admin_id': user.id
+    }
+    
+    update.message.reply_text(confirm_text, parse_mode=ParseMode.MARKDOWN)
+
+def confirm_broadcast(update, context):
+    """Confirm and send broadcast"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if 'pending_broadcast' not in context.user_data:
+        update.message.reply_text("ℹ️ *אין שידור ממתין לאישור.*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    broadcast_data = context.user_data['pending_broadcast']
+    message = broadcast_data['message']
+    total_users = len(users_db)
+    
+    # Send processing message
+    processing_msg = update.message.reply_text(
+        f"📤 *מתחיל בשידור ל-{total_users} משתמשים...*",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Send broadcast
+    success_count = 0
+    fail_count = 0
+    failed_users = []
+    
+    for user_data in users_db:
+        try:
+            user_id = user_data['user_id']
+            bot.send_message(
+                chat_id=user_id,
+                text=f"📢 *שידור מהמנהל:*\n\n{message}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            success_count += 1
+            time.sleep(0.1)  # Rate limiting
+        except Exception as e:
+            fail_count += 1
+            failed_users.append(user_data.get('username', f"ID: {user_id}"))
+            logger.error(f"Failed to send broadcast to {user_id}: {e}")
+    
+    # Save broadcast record
+    broadcast_record = {
+        'id': len(broadcasts_db) + 1,
+        'admin_id': user.id,
+        'message': message,
+        'timestamp': datetime.now().isoformat(),
+        'stats': {
+            'total_users': total_users,
+            'success': success_count,
+            'failed': fail_count,
+            'failed_users': failed_users[:10]  # Store only first 10 failed
+        }
+    }
+    broadcasts_db.append(broadcast_record)
+    save_json(BROADCASTS_FILE, broadcasts_db)
+    
+    # Clear pending broadcast
+    del context.user_data['pending_broadcast']
+    
+    # Send results
+    results_text = (
+        f"✅ *שידור הושלם!*\n\n"
+        f"📊 *תוצאות:*\n"
+        f"• 📤 נשלח בהצלחה: {success_count}\n"
+        f"• ❌ נכשל: {fail_count}\n"
+        f"• 📈 הצלחה: {(success_count/total_users*100):.1f}%\n\n"
+    )
+    
+    if failed_users:
+        results_text += f"👥 *נכשלו:*\n"
+        for failed in failed_users[:5]:
+            results_text += f"• {failed}\n"
+        if len(failed_users) > 5:
+            results_text += f"• + {len(failed_users) - 5} נוספים...\n"
+    
+    results_text += f"\n📝 *הודעה:*\n{message[:100]}..."
+    
+    processing_msg.edit_text(results_text, parse_mode=ParseMode.MARKDOWN)
+
+def users_command(update, context):
+    """Show user management options"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'users')
+    
+    if not context.args:
+        total_users = len(users_db)
+        active_users = len([u for u in users_db 
+                          if u.get('last_seen') and 
+                          (datetime.now() - datetime.fromisoformat(u['last_seen'])).days < 1])
+        
+        users_text = (
+            f"👥 *ניהול משתמשים*\n\n"
+            f"📊 *סיכום:*\n"
+            f"• 👤 משתמשים רשומים: {total_users}\n"
+            f"• 👥 פעילים היום: {active_users}\n"
+            f"• 📅 פעילים השבוע: {len([u for u in users_db if u.get('last_seen') and (datetime.now() - datetime.fromisoformat(u['last_seen'])).days < 7])}\n"
+            f"• 👑 מנהלים: {len([u for u in users_db if u.get('is_admin')])}\n\n"
+            f"⚙️ *פקודות ניהול:*\n"
+            f"`/users list` - רשימת משתמשים\n"
+            f"`/users stats` - סטטיסטיקות מפורטות\n"
+            f"`/users find <שם>` - חיפוש משתמש\n"
+            f"`/users cleanup` - ניקוי משתמשים לא פעילים\n\n"
+            f"📝 *דוגמאות:*\n"
+            f"`/users list 10` - 10 משתמשים אחרונים\n"
+            f"`/users find יוסי` - חיפוש משתמש"
+        )
+        
+        update.message.reply_text(users_text, parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    subcommand = context.args[0].lower()
+    
+    if subcommand == "list":
+        # List users
+        limit = 20
+        if len(context.args) > 1:
+            try:
+                limit = min(int(context.args[1]), 50)
+            except:
+                pass
+        
+        users_list = users_db[-limit:]  # Last N users
+        users_list.reverse()  # Newest first
+        
+        if not users_list:
+            update.message.reply_text("ℹ️ *אין משתמשים רשומים.*", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        list_text = f"📋 *רשימת משתמשים ({len(users_list)} אחרונים)*\n\n"
+        
+        for i, user_data in enumerate(users_list):
+            user_id = user_data['user_id']
+            username = user_data.get('username', 'ללא')
+            first_name = user_data.get('first_name', 'ללא שם')
+            last_seen = user_data.get('last_seen', 'לא ידוע')
+            
+            # Format last seen
+            try:
+                last_seen_dt = datetime.fromisoformat(last_seen)
+                days_ago = (datetime.now() - last_seen_dt).days
+                if days_ago == 0:
+                    last_seen_str = "היום"
+                elif days_ago == 1:
+                    last_seen_str = "אתמול"
+                else:
+                    last_seen_str = f"לפני {days_ago} יום{'ים' if days_ago > 1 else ''}"
+            except:
+                last_seen_str = "לא ידוע"
+            
+            admin_emoji = "👑" if user_data.get('is_admin') else "👤"
+            list_text += f"{i+1}. {admin_emoji} *{first_name}*"
+            
+            if username and username != 'ללא':
+                list_text += f" (@{username})"
+            
+            list_text += f"\n   🆔 `{user_id}` | 📅 {last_seen_str}\n\n"
+        
+        list_text += f"_סה״כ משתמשים: {len(users_db)}_"
+        
+        update.message.reply_text(list_text, parse_mode=ParseMode.MARKDOWN)
+    
+    elif subcommand == "stats":
+        # Detailed user statistics
+        stats_text = "📊 *סטטיסטיקות משתמשים מפורטות*\n\n"
+        
+        # Activity distribution
+        today = datetime.now().date()
+        week_ago = today - timedelta(days=7)
+        month_ago = today - timedelta(days=30)
+        
+        active_today = 0
+        active_week = 0
+        active_month = 0
+        inactive_month = 0
+        
+        for user_data in users_db:
+            if user_data.get('last_seen'):
+                try:
+                    last_seen_dt = datetime.fromisoformat(user_data['last_seen']).date()
+                    
+                    if last_seen_dt == today:
+                        active_today += 1
+                    
+                    if last_seen_dt >= week_ago:
+                        active_week += 1
+                    
+                    if last_seen_dt >= month_ago:
+                        active_month += 1
+                    else:
+                        inactive_month += 1
+                except:
+                    pass
+        
+        stats_text += f"📅 *התפלגות פעילות:*\n"
+        stats_text += f"• היום: {active_today}\n"
+        stats_text += f"• השבוע: {active_week}\n"
+        stats_text += f"• החודש: {active_month}\n"
+        stats_text += f"• לא פעיל חודש+: {inactive_month}\n\n"
+        
+        # Message statistics
+        total_messages = sum(u.get('message_count', 0) for u in users_db)
+        avg_messages = total_messages / len(users_db) if users_db else 0
+        
+        stats_text += f"💬 *סטטיסטיקות הודעות:*\n"
+        stats_text += f"• סה״כ הודעות: {total_messages}\n"
+        stats_text += f"• ממוצע למשתמש: {avg_messages:.1f}\n\n"
+        
+        # Top active users
+        active_users = sorted(users_db, key=lambda x: x.get('message_count', 0), reverse=True)[:5]
+        
+        if active_users:
+            stats_text += f"🏆 *משתמשים פעילים ביותר:*\n"
+            for i, user_data in enumerate(active_users):
+                name = user_data.get('first_name', 'ללא שם')
+                count = user_data.get('message_count', 0)
+                stats_text += f"{i+1}. {name}: {count} הודעות\n"
+        
+        update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+    
+    elif subcommand == "find" and len(context.args) > 1:
+        # Find user
+        search_term = ' '.join(context.args[1:]).lower()
+        found_users = []
+        
+        for user_data in users_db:
+            username = user_data.get('username', '').lower()
+            first_name = user_data.get('first_name', '').lower()
+            last_name = user_data.get('last_name', '').lower()
+            
+            if (search_term in username or 
+                search_term in first_name or 
+                search_term in last_name or
+                search_term == str(user_data.get('user_id', ''))):
+                found_users.append(user_data)
+        
+        if not found_users:
+            update.message.reply_text(f"ℹ️ *לא נמצאו משתמשים עבור:* {search_term}", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        found_text = f"🔍 *תוצאות חיפוש עבור '{search_term}' ({len(found_users)} תוצאות)*\n\n"
+        
+        for i, user_data in enumerate(found_users[:10]):
+            user_id = user_data['user_id']
+            username = user_data.get('username', 'ללא')
+            first_name = user_data.get('first_name', 'ללא שם')
+            last_seen = user_data.get('last_seen', 'לא ידוע')
+            
+            # Format last seen
+            try:
+                last_seen_dt = datetime.fromisoformat(last_seen)
+                days_ago = (datetime.now() - last_seen_dt).days
+                if days_ago == 0:
+                    last_seen_str = "היום"
+                elif days_ago == 1:
+                    last_seen_str = "אתמול"
+                else:
+                    last_seen_str = f"לפני {days_ago} יום{'ים' if days_ago > 1 else ''}"
+            except:
+                last_seen_str = "לא ידוע"
+            
+            admin_emoji = "👑" if user_data.get('is_admin') else "👤"
+            found_text += f"{i+1}. {admin_emoji} *{first_name}*"
+            
+            if username and username != 'ללא':
+                found_text += f" (@{username})"
+            
+            found_text += f"\n   🆔 `{user_id}` | 📅 {last_seen_str} | 💬 {user_data.get('message_count', 0)} הודעות\n\n"
+        
+        if len(found_users) > 10:
+            found_text += f"_+ {len(found_users) - 10} תוצאות נוספות..._"
+        
+        update.message.reply_text(found_text, parse_mode=ParseMode.MARKDOWN)
+    
+    elif subcommand == "cleanup":
+        # Cleanup inactive users
+        inactive_days = 30
+        if len(context.args) > 1:
+            try:
+                inactive_days = int(context.args[1])
+            except:
+                pass
+        
+        inactive_users = []
+        active_users = []
+        
+        for user_data in users_db:
+            if user_data.get('last_seen'):
+                try:
+                    last_seen_dt = datetime.fromisoformat(user_data['last_seen'])
+                    days_inactive = (datetime.now() - last_seen_dt).days
+                    
+                    if days_inactive >= inactive_days and not user_data.get('is_admin'):
+                        inactive_users.append(user_data)
+                    else:
+                        active_users.append(user_data)
+                except:
+                    active_users.append(user_data)
+            else:
+                active_users.append(user_data)
+        
+        if not inactive_users:
+            update.message.reply_text(
+                f"ℹ️ *אין משתמשים לא פעילים יותר מ-{inactive_days} יום.*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Ask for confirmation
+        confirm_text = (
+            f"⚠️ *אישור ניקוי משתמשים*\n\n"
+            f"🗑️ *יעד למחיקה:* {len(inactive_users)} משתמשים\n"
+            f"📅 *לא פעילים:* יותר מ-{inactive_days} יום\n"
+            f"👥 *יישארו:* {len(active_users)} משתמשים\n\n"
+            f"❓ *האם לאשר מחיקה?*\n"
+            f"השתמש ב `/confirm_cleanup` לאישור או כל פקודה אחרת לביטול."
+        )
+        
+        # Store cleanup data in context
+        context.user_data['pending_cleanup'] = {
+            'inactive_users': inactive_users,
+            'active_users': active_users,
+            'inactive_days': inactive_days,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        update.message.reply_text(confirm_text, parse_mode=ParseMode.MARKDOWN)
+    
+    else:
+        update.message.reply_text(
+            "❓ *פקודת users לא מזוהה*\n\n"
+            "השתמש ב `/users` ללא פרמטרים לראות את כל האפשרויות.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def confirm_cleanup(update, context):
+    """Confirm and perform user cleanup"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if 'pending_cleanup' not in context.user_data:
+        update.message.reply_text("ℹ️ *אין ניקוי ממתין לאישור.*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    cleanup_data = context.user_data['pending_cleanup']
+    inactive_users = cleanup_data['inactive_users']
+    active_users = cleanup_data['active_users']
+    inactive_days = cleanup_data['inactive_days']
+    
+    # Save backup before cleanup
+    backup_file = os.path.join(DATA_DIR, f"users_backup_{int(time.time())}.json")
+    save_json(backup_file, users_db)
+    
+    # Update users database
+    users_db.clear()
+    users_db.extend(active_users)
+    save_json(USERS_FILE, users_db)
+    
+    # Clear pending cleanup
+    del context.user_data['pending_cleanup']
+    
+    # Send results
+    results_text = (
+        f"✅ *ניקוי משתמשים הושלם!*\n\n"
+        f"📊 *תוצאות:*\n"
+        f"• 🗑️ משתמשים שנמחקו: {len(inactive_users)}\n"
+        f"• 👥 משתמשים שנותרו: {len(active_users)}\n"
+        f"• 📅 קריטריון: יותר מ-{inactive_days} יום לא פעיל\n"
+        f"• 💾 גיבוי: {backup_file}\n\n"
+        f"📝 *דוגמאות למשתמשים שנמחקו:*\n"
+    )
+    
+    for i, user_data in enumerate(inactive_users[:5]):
+        name = user_data.get('first_name', 'ללא שם')
+        last_seen = user_data.get('last_seen', 'לא ידוע')
+        results_text += f"{i+1}. {name} ({last_seen[:10]})\n"
+    
+    if len(inactive_users) > 5:
+        results_text += f"... + {len(inactive_users) - 5} נוספים\n"
+    
+    results_text += f"\n_המערכת מתעדכנת אוטומטית עם השינויים_"
+    
+    update.message.reply_text(results_text, parse_mode=ParseMode.MARKDOWN)
+
+def export_command(update, context):
+    """Export data"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'export')
+    
+    export_types = {
+        'users': ('משתמשים', users_db),
+        'messages': ('הודעות', messages_db[-1000:] if len(messages_db) > 1000 else messages_db),
+        'groups': ('קבוצות', groups_db),
+        'tasks': ('משימות', tasks_db),
+        'quiz': ('תוצאות quiz', quiz_scores_db),
+        'broadcasts': ('שידורים', broadcasts_db),
+        'all': ('הכל', {
+            'users': users_db,
+            'messages': messages_db[-1000:] if len(messages_db) > 1000 else messages_db,
+            'groups': groups_db,
+            'tasks': tasks_db,
+            'quiz_scores': quiz_scores_db,
+            'broadcasts': broadcasts_db,
+            'dna': advanced_dna.dna,
+            'stats': bot_stats.stats
+        })
+    }
+    
+    if not context.args:
+        export_text = "📤 *יצוא נתונים*\n\n"
+        export_text += "⚙️ *סוגי יצוא זמינים:*\n"
+        
+        for key, (name, data) in export_types.items():
+            count = len(data) if isinstance(data, list) else 'מורכב'
+            export_text += f"• `{key}` - {name} ({count})\n"
+        
+        export_text += "\n📝 *שימוש:* `/export <סוג>`\n"
+        export_text += "*דוגמה:* `/export users`\n"
+        export_text += "*דוגמה:* `/export all`\n\n"
+        export_text += "📊 *הערה:* נתונים נשלחים כקובץ JSON."
+        
+        update.message.reply_text(export_text, parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    export_type = context.args[0].lower()
+    
+    if export_type not in export_types:
+        update.message.reply_text(
+            f"❌ *סוג יצוא לא תקף:* {export_type}\n\n"
+            f"סוגים זמינים: {', '.join(export_types.keys())}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    export_name, export_data = export_types[export_type]
+    
+    # Create export file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"export_{export_type}_{timestamp}.json"
+    filepath = os.path.join(DATA_DIR, filename)
+    
+    try:
+        # Save export file
+        save_json(filepath, export_data)
+        
+        # Send file
+        with open(filepath, 'rb') as f:
+            update.message.reply_document(
+                document=f,
+                filename=filename,
+                caption=f"📤 *יצוא {export_name}*\n\n"
+                       f"📅 נוצר: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+                       f"📊 סוג: {export_type}\n"
+                       f"💾 גודל: {os.path.getsize(filepath) // 1024}KB"
+            )
+        
+        logger.info(f"Exported {export_type} data to {filename}")
+        
+    except Exception as e:
+        logger.error(f"Export failed: {e}")
+        update.message.reply_text(
+            f"❌ *יצוא נכשל:* {str(e)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def restart_command(update, context):
+    """Restart bot command"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'restart')
+    
+    # Send restart notification
+    restart_msg = update.message.reply_text(
+        "🔄 *מתחיל אתחול מערכת...*",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Save current state
+    save_json(USERS_FILE, users_db)
+    save_json(MESSAGES_FILE, messages_db)
+    save_json(TASKS_FILE, tasks_db)
+    save_json(QUIZ_FILE, quiz_scores_db)
+    
+    # Record restart in DNA
+    advanced_dna.record_intelligent_mutation(
+        module_id="core_bot",
+        mutation_type="system_restart",
+        description="Manual system restart initiated by admin",
+        impact="low",
+        trigger="admin_command",
+        confidence=1.0
+    )
+    
+    # Update restart message
+    restart_msg.edit_text(
+        "✅ *אתחול הושלם!*\n\n"
+        "המערכת נשמרה ואותחלה.\n"
+        "כל הנתונים נשמרו.\n\n"
+        "_הבוט ממשיך לפעול כרגיל_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def unknown(update, context):
+    """Handle unknown commands"""
+    log_message(update, 'unknown')
+    update.message.reply_text(
+        "❓ *פקודה לא מזוהה*\n\n"
+        "אני לא מכיר את הפקודה הזאת.\n\n"
+        "השתמש ב /help כדי לראות את רשימת הפקודות הזמינות.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def error_handler(update, context):
+    """Handle errors"""
+    try:
+        raise context.error
+    except Exception as e:
+        logger.error(f"Exception while handling an update: {e}", exc_info=True)
+        bot_stats.update('error')
+        
+        # Record error in DNA
+        advanced_dna.record_intelligent_mutation(
+            module_id="error_handler",
+            mutation_type="error_occurred",
+            description=f"Error in update handling: {str(e)[:100]}",
+            impact="low",
+            trigger="system_error",
+            confidence=0.5
+        )
+        
+        # Send error to admin if update exists
+        if update and update.effective_user:
+            try:
+                if is_admin(update.effective_user.id):
+                    error_msg = (
+                        f"⚠️ *שגיאה במערכת*\n\n"
+                        f"*סוג:* {type(e).__name__}\n"
+                        f"*הודעה:* {str(e)[:200]}\n\n"
+                        f"השגיאה נרשמה ביומן."
+                    )
+                    update.message.reply_text(error_msg, parse_mode=ParseMode.MARKDOWN)
+            except:
+                pass
+
 # ==================== ENHANCED DNA FUNCTIONS ====================
 def register_existing_modules():
     """Enhanced module registration"""
@@ -1957,7 +2750,7 @@ def auto_evolve_check():
                 if ADMIN_USER_ID:
                     try:
                         bot.send_message(
-                            chat_id=ADMIN_USER_ID,
+                            chat_id=int(ADMIN_USER_ID),
                             text=f"🤖 *אבולוציה אוטומטית התרחשה!*\n\n"
                                  f"*סיבה:* {reason}\n"
                                  f"*מזהה אבולוציה:* {evolution_id}\n"
@@ -2195,7 +2988,7 @@ def evolve_command(update, context):
         )
         
         # Show some user patterns
-        user_patterns = insights.get('user_patterns', {})
+        user_patterns = insights.get("user_patterns", {})
         if user_patterns:
             sample_users = list(user_patterns.items())[:3]
             learn_text += f"*דוגמאות דפוסי משתמשים:*\n"
@@ -2221,6 +3014,13 @@ def evolve_command(update, context):
         learn_text += f"\n_למידה מתמשכת: {datetime.now().strftime('%H:%M')}_"
         
         update.message.reply_text(learn_text, parse_mode=ParseMode.MARKDOWN)
+    
+    else:
+        update.message.reply_text(
+            "❓ *פקודת evolve לא מזוהה*\n\n"
+            "השתמש ב `/evolve` ללא פרמטרים לראות את כל האפשרויות.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 def lineage_command(update, context):
     """Enhanced lineage command"""
@@ -3957,6 +4757,7 @@ dispatcher.add_handler(CommandHandler("profile", profile_command))
 dispatcher.add_handler(CommandHandler("id", show_id))
 dispatcher.add_handler(CommandHandler("info", bot_info))
 dispatcher.add_handler(CommandHandler("ping", ping))
+dispatcher.add_handler(CommandHandler("about", about_command))
 
 # New feature commands
 dispatcher.add_handler(CommandHandler("stock", stock_command))
@@ -3977,8 +4778,10 @@ dispatcher.add_handler(CommandHandler("lineage", lineage_command))
 dispatcher.add_handler(CommandHandler("admin", admin_panel))
 dispatcher.add_handler(CommandHandler("stats", admin_stats))
 dispatcher.add_handler(CommandHandler("broadcast", broadcast_command, pass_args=True))
-dispatcher.add_handler(CommandHandler("users", users_command))
-dispatcher.add_handler(CommandHandler("export", export_command))
+dispatcher.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast))
+dispatcher.add_handler(CommandHandler("users", users_command, pass_args=True))
+dispatcher.add_handler(CommandHandler("confirm_cleanup", confirm_cleanup))
+dispatcher.add_handler(CommandHandler("export", export_command, pass_args=True))
 dispatcher.add_handler(CommandHandler("restart", restart_command))
 
 # Callback query handler (for inline buttons)
