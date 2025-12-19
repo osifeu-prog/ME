@@ -1564,6 +1564,12 @@ def get_or_create_user(user_data, chat_type='private'):
     for user in users_db:
         if user['user_id'] == user_id:
             # Update user info with enhanced data
+            # וודא שה-statistics מכיל את 'commands_used'
+            if 'stats' not in user:
+                user['stats'] = {}
+            if 'commands_used' not in user['stats']:
+                user['stats']['commands_used'] = {}
+            
             updates = {
                 'username': user_data.get('username'),
                 'first_name': user_data.get('first_name'),
@@ -1575,7 +1581,8 @@ def get_or_create_user(user_data, chat_type='private'):
                 'stats': {
                     'total_interactions': user.get('stats', {}).get('total_interactions', 0) + 1,
                     'last_command': None,
-                    'favorite_features': user.get('stats', {}).get('favorite_features', [])
+                    'favorite_features': user.get('stats', {}).get('favorite_features', []),
+                    'commands_used': user.get('stats', {}).get('commands_used', {})  # וודא שזה קיים
                 }
             }
             user.update(updates)
@@ -1604,7 +1611,7 @@ def get_or_create_user(user_data, chat_type='private'):
         },
         'stats': {
             'total_interactions': 1,
-            'commands_used': {},
+            'commands_used': {},  # הוסף את זה כאן
             'favorite_features': [],
             'engagement_score': 0.5
         },
@@ -1699,6 +1706,10 @@ def log_message(update, command=None):
     
     # Update user stats
     if command:
+        # וודא ש-commands_used קיים
+        if 'commands_used' not in user_record['stats']:
+            user_record['stats']['commands_used'] = {}
+        
         user_record['stats']['commands_used'][command] = \
             user_record['stats']['commands_used'].get(command, 0) + 1
         user_record['stats']['last_command'] = command
