@@ -6290,36 +6290,24 @@ def evolution_report():
 
 # ==================== ENHANCED INITIALIZATION ====================
 def setup_webhook():
-    """Enhanced webhook setup with secret token"""
+    """Enhanced webhook setup WITHOUT secret token (PTB 13.7 compatible)"""
     if WEBHOOK_URL:
         try:
             # Ensure webhook URL ends with /webhook
             webhook_url = WEBHOOK_URL.rstrip('/') + '/webhook'
             
-            # Set webhook with secret token
+            # Set webhook WITHOUT secret token (not supported in PTB 13.x)
             bot.set_webhook(
-                url=webhook_url,
-                secret_token=WEBHOOK_SECRET if WEBHOOK_SECRET and WEBHOOK_SECRET.strip() else None
+                url=webhook_url
             )
             
-            logger.info(f"✅ Webhook configured: {webhook_url}")
-            logger.info(f"🔐 Webhook secret: {'Enabled' if WEBHOOK_SECRET else 'Disabled'}")
-            logger.info(f"🤖 Bot ID: {BOT_ID}, Username: @{BOT_USERNAME}")
-            
+            logger.info(f"✅ Webhook set successfully: {webhook_url}")
+        
         except Exception as e:
-            logger.error(f"⚠️ Webhook setup failed: {e}")
-            logger.warning("Bot will still run but webhook won't work properly")
-    else:
-        logger.warning("⚠️ WEBHOOK_URL not set, webhook not configured")
+            logger.error(f"❌ Failed to set webhook: {e}")
 
-if __name__ == '__main__':
-    logger.info("🚀 Starting Enhanced Evolutionary Telegram Bot")
-    
-    # Initialize enhanced evolution system
-    initialize_evolution()
-    
-    # Setup webhook
-    setup_webhook()
+
+
     
     # Log startup info with enhanced details
     stats = bot_stats.get_summary()
