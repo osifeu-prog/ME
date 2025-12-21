@@ -803,7 +803,8 @@ class AdvancedBotDNA:
                 "adaptation_level": self.dna.get("adaptation_level", 0),
                 "total_mutations": len(self.dna.get("mutations", [])),
                 "total_modules": len(self.dna.get("modules", {})),
-                "last_evolution": self.dna.get("last_evolution")
+                "last_evolution": self.dna.get("last_evolution"),
+                "creation_date": self.dna.get("creation_date", datetime.now().isoformat())
             },
             "traits": self.dna.get("traits", {}),
             "capabilities": self.dna.get("capabilities", {}),
@@ -1645,7 +1646,7 @@ def register_group(chat):
         if group['chat_id'] == chat_id:
             group['last_activity'] = datetime.now().isoformat()
             group['title'] = chat.title
-            group['member_count'] = chat.get_members_count() if hasattr(chat, 'get_members_count') else group.get('member_count', 0)
+            group['member_count'] = chat.get_member_count() if hasattr(chat, 'get_member_count') else group.get('member_count', 0)
             group['active'] = True
             
             # Update group stats
@@ -1664,7 +1665,7 @@ def register_group(chat):
         'type': chat.type,
         'first_seen': datetime.now().isoformat(),
         'last_activity': datetime.now().isoformat(),
-        'member_count': chat.get_members_count() if hasattr(chat, 'get_members_count') else 0,
+        'member_count': chat.get_member_count() if hasattr(chat, 'get_member_count') else 0,
         'active': True,
         'settings': {
             'welcome_message': True,
@@ -1674,7 +1675,7 @@ def register_group(chat):
         },
         'stats': {
             'interaction_count': 1,
-            'unique_users': 1,
+            'unique_users': set(),
             'message_count': 0,
             'last_bot_interaction': datetime.now().isoformat()
         },
@@ -1731,6 +1732,11 @@ def log_message(update, command=None):
             # Track unique users in group
             if 'unique_users' not in group_record['stats']:
                 group_record['stats']['unique_users'] = set()
+            elif isinstance(group_record['stats']['unique_users'], int):
+                # אם זה int, נמיר ל-set
+                old_value = group_record['stats']['unique_users']
+                group_record['stats']['unique_users'] = {old_value}
+            
             group_record['stats']['unique_users'].add(user.id)
     
     # Create enhanced message log
