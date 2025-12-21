@@ -7,7 +7,6 @@ import random
 import requests
 import threading
 import asyncio
-import openai
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Set, Union
 from flask import Flask, request, jsonify, Response
@@ -23,6 +22,32 @@ from telegram.ext import (
 )
 from telegram.utils.helpers import escape_markdown
 import traceback
+
+# ==================== TRY IMPORT OPENAI WITH FALLBACK ====================
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+    logger_import = logging.getLogger(__name__)
+    logger_import.info("✅ OpenAI module successfully imported")
+except ImportError as e:
+    OPENAI_AVAILABLE = False
+    logger_import = logging.getLogger(__name__)
+    logger_import.warning(f"⚠️ OpenAI module not available: {e}")
+    logger_import.warning("⚠️ AI features will be disabled. Install with: pip install openai")
+    
+    # Create a dummy openai module to avoid import errors
+    class DummyOpenAI:
+        class ChatCompletion:
+            @staticmethod
+            def create(**kwargs):
+                raise ImportError("OpenAI module not installed")
+        
+        class Completion:
+            @staticmethod
+            def create(**kwargs):
+                raise ImportError("OpenAI module not installed")
+    
+    openai = DummyOpenAI()
 
 # ==================== CONFIGURATION ====================
 logging.basicConfig(
@@ -60,11 +85,15 @@ if not TOKEN:
 if not WEBHOOK_URL:
     logger.warning("⚠️ WEBHOOK_URL not set, webhook will not be configured")
 
-if OPENAI_API_KEY:
+# Initialize OpenAI only if available and key is provided
+if OPENAI_API_KEY and OPENAI_AVAILABLE:
     openai.api_key = OPENAI_API_KEY
     logger.info("✅ OpenAI API configured")
+elif OPENAI_API_KEY and not OPENAI_AVAILABLE:
+    logger.warning("⚠️ OPENAI_API_KEY is set but openai module not installed")
+    logger.warning("⚠️ Install with: pip install openai")
 else:
-    logger.warning("⚠️ OPENAI_API_KEY not set, AI features will be limited")
+    logger.warning("⚠️ OPENAI_API_KEY not set or module not available, AI features will be limited")
 
 # Bot initialization
 bot = Bot(token=TOKEN)
@@ -296,9 +325,17 @@ class AdvancedAISystem:
         self.conversations = ai_conversations_db
         self.module_id = None
         
-        if self.api_key:
-            openai.api_key = self.api_key
-            self._register_module()
+        if self.api_key and OPENAI_AVAILABLE:
+            try:
+                openai.api_key = self.api_key
+                self._register_module()
+                logger.info("🧠 Advanced AI System initialized with OpenAI")
+            except Exception as e:
+                logger.error(f"Failed to initialize OpenAI: {e}")
+                self.api_key = None
+        else:
+            logger.warning("🧠 AI System disabled: OpenAI API key not configured or module not available")
+            self.api_key = None
     
     def _register_module(self):
         """Register AI module in DNA system"""
@@ -310,8 +347,11 @@ class AdvancedAISystem:
     def chat_completion(self, user_id: int, message: str, context: List[Dict] = None, 
                        model: str = "gpt-3.5-turbo", max_tokens: int = 1000):
         """Get AI chat completion"""
-        if not self.api_key:
-            return {"success": False, "error": "OpenAI API key not configured"}
+        if not self.api_key or not OPENAI_AVAILABLE:
+            return {
+                "success": False, 
+                "error": "OpenAI API not available. Please install openai module: pip install openai"
+            }
         
         try:
             # Prepare conversation history
@@ -372,6 +412,9 @@ class AdvancedAISystem:
     
     def analyze_sentiment(self, text: str):
         """Analyze text sentiment"""
+        if not self.api_key or not OPENAI_AVAILABLE:
+            return {"success": False, "error": "OpenAI not available"}
+        
         try:
             prompt = f"analyze the sentiment of this text and provide a score from -1 (very negative) to 1 (very positive): {text}"
             
@@ -393,6 +436,9 @@ class AdvancedAISystem:
     def generate_content(self, prompt: str, content_type: str = "text", 
                         max_tokens: int = 500):
         """Generate content based on prompt"""
+        if not self.api_key or not OPENAI_AVAILABLE:
+            return {"success": False, "error": "OpenAI not available"}
+        
         try:
             if content_type == "text":
                 response = openai.Completion.create(
@@ -428,6 +474,10 @@ class AdvancedAISystem:
             save_json(AI_CONVERSATIONS_FILE, self.conversations)
             return {"success": True}
         return {"success": False, "error": "No conversation found"}
+    
+    def is_available(self):
+        """Check if AI system is available"""
+        return bool(self.api_key and OPENAI_AVAILABLE)
 
 # Initialize AI system
 ai_system = AdvancedAISystem()
@@ -715,7 +765,7 @@ class AdvancedBotDNA:
                 "automation": True,
                 "integration": True,
                 "learning": True,
-                "ai": bool(OPENAI_API_KEY),
+                "ai": bool(OPENAI_API_KEY and OPENAI_AVAILABLE),
                 "admin_management": True,
                 "referral_system": True
             },
@@ -724,7 +774,7 @@ class AdvancedBotDNA:
                 "reliability": 0.95,
                 "innovation": 0.75,
                 "efficiency": 0.85,
-                "ai_intelligence": 0.6 if OPENAI_API_KEY else 0.0
+                "ai_intelligence": 0.6 if (OPENAI_API_KEY and OPENAI_AVAILABLE) else 0.0
             }
         }
         
@@ -1337,6 +1387,9 @@ class FinancialAssistant:
     def get_stock_price(self, symbol: str) -> Dict:
         """Get current stock price"""
         try:
+            if not self.api_key:
+                return {"success": False, "error": "Alpha Vantage API key not configured"}
+            
             params = {
                 "function": "GLOBAL_QUOTE",
                 "symbol": symbol,
@@ -1367,6 +1420,9 @@ class FinancialAssistant:
     def get_stock_analysis(self, symbol: str) -> Dict:
         """Get stock analysis and overview"""
         try:
+            if not self.api_key:
+                return {"success": False, "error": "Alpha Vantage API key not configured"}
+            
             params = {
                 "function": "OVERVIEW",
                 "symbol": symbol,
@@ -1432,6 +1488,9 @@ class FinancialAssistant:
     def get_exchange_rate(self, from_currency: str, to_currency: str) -> Dict:
         """Get currency exchange rate"""
         try:
+            if not self.api_key:
+                return {"success": False, "error": "Alpha Vantage API key not configured"}
+            
             params = {
                 "function": "CURRENCY_EXCHANGE_RATE",
                 "from_currency": from_currency,
@@ -2269,7 +2328,7 @@ def get_main_keyboard(user_id=None):
             base_buttons[1].insert(0, KeyboardButton("📈 מניות"))
     
     # Add AI button if available
-    if OPENAI_API_KEY:
+    if ai_system.is_available():
         base_buttons[0].append(KeyboardButton("🤖 AI"))
     
     # Add admin buttons if admin
@@ -2553,10 +2612,16 @@ def ai_command(update, context):
     """AI chat command"""
     log_message(update, 'ai')
     
-    if not OPENAI_API_KEY:
+    if not ai_system.is_available():
         update.message.reply_text(
             "🤖 *AI לא זמין כרגע*\n\n"
-            "מפתח OpenAI API לא הוגדר.\n"
+            "מפתח OpenAI API לא הוגדר או מודול openai לא מותקן.\n\n"
+            "*כדי להפעיל AI:*\n"
+            "1. הגדר OPENAI_API_KEY ב-Railway\n"
+            "2. או התקן את מודול openai:\n"
+            "   ```bash\n"
+            "   pip install openai\n"
+            "   ```\n\n"
             "אנא צור קשר עם המנהל כדי להפעיל את פונקציות ה-AI.",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -2706,9 +2771,10 @@ def ai_analyze_command(update, context):
     """Analyze text with AI"""
     log_message(update, 'ai_analyze')
     
-    if not OPENAI_API_KEY:
+    if not ai_system.is_available():
         update.message.reply_text(
-            "❌ *AI לא זמין כרגע*",
+            "❌ *AI לא זמין כרגע*\n"
+            "אנא התקן openai: `pip install openai`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -3677,7 +3743,7 @@ def register_existing_modules():
     )
     
     # AI module
-    if OPENAI_API_KEY:
+    if ai_system.is_available():
         advanced_dna.register_advanced_module(
             module_name="ai_intelligence",
             module_type="ai",
@@ -4887,15 +4953,15 @@ def answer_command(update, context):
             )
             return
         
-        is_correct = (answer_index == question['correct'])
+        is_correct = (answer_index == question["correct"])
         
         # Clear the stored question
         del context.user_data['trivia_question']
         
         # Prepare response
         letters = ['א', 'ב', 'ג', 'ד']
-        correct_letter = letters[question['correct']]
-        correct_answer = question['options'][question['correct']]
+        correct_letter = letters[question["correct"]]
+        correct_answer = question['options'][question["correct"]]
         
         if is_correct:
             response_text = (
@@ -5278,7 +5344,7 @@ def features_command(update, context):
     features_text += "• 📝 ניהול משימות ותזכורות\n"
     
     # AI system
-    if OPENAI_API_KEY:
+    if ai_system.is_available():
         features_text += "• 🤖 AI מתקדם עם OpenAI\n"
     
     # Evolution system
@@ -5676,7 +5742,7 @@ def handle_text(update, context):
             f"• סוד Webhook: {'מוגדר ✅' if WEBHOOK_SECRET else 'לא מוגדר'}\n"
             f"• מנהל: {ADMIN_USER_ID}\n"
             f"• API מניות: {'פעיל ✅' if ALPHAVANTAGE_API_KEY else 'לא מוגדר'}\n"
-            f"• API OpenAI: {'פעיל ✅' if OPENAI_API_KEY else 'לא מוגדר'}\n\n"
+            f"• API OpenAI: {'פעיל ✅' if ai_system.is_available() else 'לא מוגדר'}\n\n"
             f"💾 *מאגר נתונים:*\n"
             f"• משתמשים: {len(users_db)}\n"
             f"• קבוצות: {len(groups_db)}\n"
@@ -5993,7 +6059,7 @@ def home():
         },
         "features": {
             "financial": bool(ALPHAVANTAGE_API_KEY),
-            "ai": bool(OPENAI_API_KEY),
+            "ai": ai_system.is_available(),
             "quiz_games": True,
             "task_management": True,
             "dna_evolution": True,
@@ -6150,7 +6216,7 @@ def system_status():
                 "requests_today": 0  # Could track this
             },
             "ai": {
-                "enabled": bool(OPENAI_API_KEY),
+                "enabled": ai_system.is_available(),
                 "total_requests": stats['ai_requests']
             },
             "quiz": {
@@ -6267,7 +6333,7 @@ if __name__ == '__main__':
     logger.info(f"🤖 Bot: {BOT_NAME} (@{BOT_USERNAME}, ID: {BOT_ID})")
     logger.info(f"👑 Admin ID: {ADMIN_USER_ID or 'Not configured'}")
     logger.info(f"💰 Financial API: {'Enabled' if ALPHAVANTAGE_API_KEY else 'Disabled'}")
-    logger.info(f"🤖 OpenAI API: {'Enabled' if OPENAI_API_KEY else 'Disabled'}")
+    logger.info(f"🤖 OpenAI API: {'Available' if ai_system.is_available() else 'Not available'}")
     logger.info(f"🔐 Webhook Secret: {'Set' if WEBHOOK_SECRET and WEBHOOK_SECRET.strip() else 'Not set'}")
     
     logger.info(f"💾 Storage: {len(users_db)} users, {len(groups_db)} groups, "
