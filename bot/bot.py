@@ -6,6 +6,8 @@ import time
 import random
 import requests
 import threading
+import asyncio
+import openai
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Set, Union
 from flask import Flask, request, jsonify, Response
@@ -41,6 +43,7 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '123').strip()
 ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID', '').strip()
 ALPHAVANTAGE_API_KEY = os.environ.get('ALPHAVANTAGE_API_KEY', '').strip()
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
 COMMUNITY_GROUP_ID = os.environ.get('COMMUNITY_GROUP_ID', '').strip()
 PAYMENT_GROUP_ID = os.environ.get('PAYMENT_GROUP_ID', '').strip()
 DEFAULT_EXCHANGE = os.environ.get('DEFAULT_EXCHANGE', 'NYSE').strip()
@@ -56,6 +59,12 @@ if not TOKEN:
 
 if not WEBHOOK_URL:
     logger.warning("⚠️ WEBHOOK_URL not set, webhook will not be configured")
+
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+    logger.info("✅ OpenAI API configured")
+else:
+    logger.warning("⚠️ OPENAI_API_KEY not set, AI features will be limited")
 
 # Bot initialization
 bot = Bot(token=TOKEN)
@@ -84,6 +93,9 @@ STOCKS_FILE = os.path.join(DATA_DIR, "stocks.json")
 ECONOMIC_FILE = os.path.join(DATA_DIR, "economic_events.json")
 QUIZ_FILE = os.path.join(DATA_DIR, "quiz_scores.json")
 TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
+ADMIN_REQUESTS_FILE = os.path.join(DATA_DIR, "admin_requests.json")
+REFERRALS_FILE = os.path.join(DATA_DIR, "referrals.json")
+AI_CONVERSATIONS_FILE = os.path.join(DATA_DIR, "ai_conversations.json")
 
 # Ensure data directory exists
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -120,6 +132,411 @@ stocks_db = load_json(STOCKS_FILE, {})
 economic_events_db = load_json(ECONOMIC_FILE, [])
 quiz_scores_db = load_json(QUIZ_FILE, {})
 tasks_db = load_json(TASKS_FILE, [])
+admin_requests_db = load_json(ADMIN_REQUESTS_FILE, [])
+referrals_db = load_json(REFERRALS_FILE, {})
+ai_conversations_db = load_json(AI_CONVERSATIONS_FILE, {})
+
+# ==================== ADVANCED ADMIN REQUEST SYSTEM ====================
+class AdminRequestSystem:
+    """System for users to request admin access"""
+    
+    def __init__(self):
+        self.requests = admin_requests_db
+        
+    def request_admin_access(self, user_id: int, username: str, first_name: str, 
+                            reason: str = "", experience: str = ""):
+        """Submit admin access request"""
+        request_id = len(self.requests) + 1
+        
+        # Check if user already has pending request
+        for req in self.requests:
+            if req['user_id'] == user_id and req['status'] == 'pending':
+                return {"success": False, "error": "יש לך בקשה ממתינה כבר"}
+        
+        request_data = {
+            'id': request_id,
+            'user_id': user_id,
+            'username': username,
+            'first_name': first_name,
+            'reason': reason,
+            'experience': experience,
+            'submitted_at': datetime.now().isoformat(),
+            'status': 'pending',
+            'reviewed_by': None,
+            'reviewed_at': None,
+            'notes': ''
+        }
+        
+        self.requests.append(request_data)
+        save_json(ADMIN_REQUESTS_FILE, self.requests)
+        
+        # Notify main admin
+        self._notify_admin(request_data)
+        
+        return {"success": True, "request_id": request_id}
+    
+    def _notify_admin(self, request_data: Dict):
+        """Notify admin about new request"""
+        if not ADMIN_USER_ID:
+            return
+        
+        try:
+            message = (
+                f"👑 *בקשה חדשה לגישת אדמין!*\n\n"
+                f"👤 *משתמש:* {request_data['first_name']}\n"
+                f"🆔 *ID:* `{request_data['user_id']}`\n"
+                f"📛 *משתמש:* @{request_data['username'] or 'ללא'}\n"
+                f"📝 *סיבה:* {request_data['reason'][:200] if request_data['reason'] else 'לא צוינה'}\n"
+                f"💼 *ניסיון:* {request_data['experience'][:200] if request_data['experience'] else 'לא צוין'}\n\n"
+                f"⏰ *נשלח:* {datetime.fromisoformat(request_data['submitted_at']).strftime('%d/%m/%Y %H:%M')}\n\n"
+                f"✅ *אשר בקשה:* `/approve_admin {request_data['id']}`\n"
+                f"❌ *דחה בקשה:* `/reject_admin {request_data['id']}`\n"
+                f"📋 *כל הבקשות:* `/admin_requests`"
+            )
+            
+            bot.send_message(
+                chat_id=int(ADMIN_USER_ID),
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin: {e}")
+    
+    def get_pending_requests(self):
+        """Get all pending requests"""
+        return [req for req in self.requests if req['status'] == 'pending']
+    
+    def approve_request(self, request_id: int, admin_id: int, notes: str = ""):
+        """Approve admin request"""
+        for req in self.requests:
+            if req['id'] == request_id:
+                req['status'] = 'approved'
+                req['reviewed_by'] = admin_id
+                req['reviewed_at'] = datetime.now().isoformat()
+                req['notes'] = notes
+                
+                # Update user in users_db to admin
+                for user in users_db:
+                    if user['user_id'] == req['user_id']:
+                        user['is_admin'] = True
+                        user['admin_since'] = datetime.now().isoformat()
+                        break
+                
+                save_json(ADMIN_REQUESTS_FILE, self.requests)
+                save_json(USERS_FILE, users_db)
+                
+                # Notify user
+                self._notify_user(req['user_id'], True, notes)
+                return {"success": True, "user_id": req['user_id']}
+        return {"success": False, "error": "בקשה לא נמצאה"}
+    
+    def reject_request(self, request_id: int, admin_id: int, notes: str = ""):
+        """Reject admin request"""
+        for req in self.requests:
+            if req['id'] == request_id:
+                req['status'] = 'rejected'
+                req['reviewed_by'] = admin_id
+                req['reviewed_at'] = datetime.now().isoformat()
+                req['notes'] = notes
+                
+                save_json(ADMIN_REQUESTS_FILE, self.requests)
+                
+                # Notify user
+                self._notify_user(req['user_id'], False, notes)
+                return {"success": True, "user_id": req['user_id']}
+        return {"success": False, "error": "בקשה לא נמצאה"}
+    
+    def _notify_user(self, user_id: int, approved: bool, notes: str = ""):
+        """Notify user about request decision"""
+        try:
+            if approved:
+                message = (
+                    f"🎉 *בקשתך לגישת אדמין אושרה!*\n\n"
+                    f"✅ מעתה יש לך גישה מלאה לפונקציות הניהול של הבוט.\n\n"
+                    f"👑 *פונקציות אדמין זמינות:*\n"
+                    f"• ניהול משתמשים וקבוצות\n"
+                    f"• שידורים המוניים\n"
+                    f"• ניהול בקשות אדמין\n"
+                    f"• גישה לנתונים סטטיסטיים מתקדמים\n"
+                    f"• ניהול מערכת ה-DNA\n"
+                    f"• בקרה על פונקציות AI\n\n"
+                    f"⚡ *התחל להשתמש ב:*\n"
+                    f"/admin - לוח בקרת מנהלים\n"
+                    f"/stats - סטטיסטיקות מתקדמות\n"
+                    f"/help_admin - מדריך למנהלים\n\n"
+                )
+            else:
+                message = (
+                    f"❌ *בקשתך לגישת אדמין נדחתה*\n\n"
+                    f"הבקשה שלך נבדקה ולא אושרה בשלב זה.\n\n"
+                )
+            
+            if notes:
+                message += f"📝 *הערות:* {notes}\n\n"
+            
+            message += f"_תאריך: {datetime.now().strftime('%d/%m/%Y %H:%M')}_"
+            
+            bot.send_message(
+                chat_id=user_id,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user: {e}")
+
+# Initialize admin request system
+admin_request_system = AdminRequestSystem()
+
+# ==================== ADVANCED AI SYSTEM WITH OPENAI ====================
+class AdvancedAISystem:
+    """Advanced AI system with OpenAI integration"""
+    
+    def __init__(self):
+        self.api_key = OPENAI_API_KEY
+        self.conversations = ai_conversations_db
+        self.module_id = None
+        
+        if self.api_key:
+            openai.api_key = self.api_key
+            self._register_module()
+    
+    def _register_module(self):
+        """Register AI module in DNA system"""
+        self.module_id = "ai_system_v2"
+        
+        # Record AI module creation
+        logger.info("🧠 Advanced AI System initialized with OpenAI")
+    
+    def chat_completion(self, user_id: int, message: str, context: List[Dict] = None, 
+                       model: str = "gpt-3.5-turbo", max_tokens: int = 1000):
+        """Get AI chat completion"""
+        if not self.api_key:
+            return {"success": False, "error": "OpenAI API key not configured"}
+        
+        try:
+            # Prepare conversation history
+            if str(user_id) not in self.conversations:
+                self.conversations[str(user_id)] = []
+            
+            user_conversation = self.conversations[str(user_id)]
+            
+            # Add system message if first in conversation
+            if not user_conversation:
+                system_message = {
+                    "role": "system",
+                    "content": (
+                        "אתה עוזר AI חכם בבוט Telegram. אתה יכול לעזור עם: "
+                        "1. שאלות כללית וידע כללי\n"
+                        "2. ייעוץ טכנולוגי ותכנות\n"
+                        "3. ניתוח מידע ונתונים\n"
+                        "4. כתיבת קוד ופתרון בעיות\n"
+                        "5. ייעוץ עסקי ופיננסי\n"
+                        "6. יצירת תוכן ורעיונות\n"
+                        "דבר בעברית אלא אם כן מבקשים אחרת."
+                    )
+                }
+                user_conversation.append(system_message)
+            
+            # Add user message
+            user_conversation.append({"role": "user", "content": message})
+            
+            # Keep conversation within limit
+            if len(user_conversation) > 20:
+                user_conversation = user_conversation[-20:]
+            
+            # Call OpenAI API
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=user_conversation,
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
+            
+            ai_response = response.choices[0].message.content
+            
+            # Add AI response to conversation
+            user_conversation.append({"role": "assistant", "content": ai_response})
+            self.conversations[str(user_id)] = user_conversation
+            save_json(AI_CONVERSATIONS_FILE, self.conversations)
+            
+            return {
+                "success": True,
+                "response": ai_response,
+                "tokens_used": response.usage.total_tokens,
+                "model": model
+            }
+            
+        except Exception as e:
+            logger.error(f"OpenAI API error: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def analyze_sentiment(self, text: str):
+        """Analyze text sentiment"""
+        try:
+            prompt = f"analyze the sentiment of this text and provide a score from -1 (very negative) to 1 (very positive): {text}"
+            
+            response = openai.Completion.create(
+                model="text-davinci-003",
+                prompt=prompt,
+                max_tokens=100,
+                temperature=0.3
+            )
+            
+            return {
+                "success": True,
+                "analysis": response.choices[0].text.strip(),
+                "tokens_used": response.usage.total_tokens
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def generate_content(self, prompt: str, content_type: str = "text", 
+                        max_tokens: int = 500):
+        """Generate content based on prompt"""
+        try:
+            if content_type == "text":
+                response = openai.Completion.create(
+                    model="text-davinci-003",
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=0.7
+                )
+                content = response.choices[0].text.strip()
+            elif content_type == "code":
+                response = openai.Completion.create(
+                    model="code-davinci-002",
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=0.5
+                )
+                content = response.choices[0].text.strip()
+            else:
+                return {"success": False, "error": "Invalid content type"}
+            
+            return {
+                "success": True,
+                "content": content,
+                "tokens_used": response.usage.total_tokens
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def clear_conversation(self, user_id: int):
+        """Clear user's conversation history"""
+        if str(user_id) in self.conversations:
+            self.conversations[str(user_id)] = []
+            save_json(AI_CONVERSATIONS_FILE, self.conversations)
+            return {"success": True}
+        return {"success": False, "error": "No conversation found"}
+
+# Initialize AI system
+ai_system = AdvancedAISystem()
+
+# ==================== REFERRAL & SHARING SYSTEM ====================
+class ReferralSystem:
+    """System to encourage users to share the bot"""
+    
+    def __init__(self):
+        self.referrals = referrals_db
+        
+    def generate_referral_code(self, user_id: int):
+        """Generate unique referral code for user"""
+        code = f"REF{user_id}{random.randint(1000, 9999)}"
+        
+        if 'referral_codes' not in self.referrals:
+            self.referrals['referral_codes'] = {}
+        
+        self.referrals['referral_codes'][str(user_id)] = {
+            'code': code,
+            'generated_at': datetime.now().isoformat(),
+            'uses': 0,
+            'referred_users': []
+        }
+        
+        save_json(REFERRALS_FILE, self.referrals)
+        return code
+    
+    def register_referral(self, referrer_id: int, new_user_id: int):
+        """Register new user referral"""
+        referrer_key = str(referrer_id)
+        
+        if referrer_key not in self.referrals.get('referral_codes', {}):
+            return False
+        
+        # Add to referrer's list
+        self.referrals['referral_codes'][referrer_key]['uses'] += 1
+        self.referrals['referral_codes'][referrer_key]['referred_users'].append({
+            'user_id': new_user_id,
+            'joined_at': datetime.now().isoformat()
+        })
+        
+        # Record for new user
+        if 'referred_by' not in self.referrals:
+            self.referrals['referred_by'] = {}
+        
+        self.referrals['referred_by'][str(new_user_id)] = referrer_id
+        
+        save_json(REFERRALS_FILE, self.referrals)
+        
+        # Award referrer
+        self._award_referrer(referrer_id)
+        
+        return True
+    
+    def _award_referrer(self, referrer_id: int):
+        """Award referrer for successful referral"""
+        # Update user stats
+        for user in users_db:
+            if user['user_id'] == referrer_id:
+                if 'referrals' not in user:
+                    user['referrals'] = 0
+                user['referrals'] += 1
+                
+                # Award points or benefits
+                if 'stats' not in user:
+                    user['stats'] = {}
+                if 'bonus_points' not in user['stats']:
+                    user['stats']['bonus_points'] = 0
+                user['stats']['bonus_points'] += 100
+                
+                break
+        
+        save_json(USERS_FILE, users_db)
+        
+        # Notify referrer
+        try:
+            bot.send_message(
+                chat_id=referrer_id,
+                text=(
+                    "🎉 *הפניה חדשה נרשמה!*\n\n"
+                    "משתמש חדש הצטרף באמצעות קוד ההפניה שלך.\n"
+                    "🏆 זכית ב-100 נקודות בונוס!\n\n"
+                    "שתף את הקוד שלך עם עוד חברים:\n"
+                    f"`/referral`"
+                ),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except:
+            pass
+    
+    def get_user_stats(self, user_id: int):
+        """Get user's referral statistics"""
+        referrer_key = str(user_id)
+        
+        if referrer_key not in self.referrals.get('referral_codes', {}):
+            return None
+        
+        data = self.referrals['referral_codes'][referrer_key]
+        
+        return {
+            'code': data['code'],
+            'total_referrals': data['uses'],
+            'referred_users': data['referred_users'],
+            'generated_at': data['generated_at']
+        }
+
+# Initialize referral system
+referral_system = ReferralSystem()
 
 # ==================== ENHANCED STATS SYSTEM ====================
 class BotStatistics:
@@ -140,7 +557,10 @@ class BotStatistics:
             'daily_active_users': {},
             'hourly_activity': {},
             'features_used': {},
-            'errors_count': 0
+            'errors_count': 0,
+            'ai_requests': 0,
+            'admin_requests': 0,
+            'referrals': 0
         }
         
         # Load from existing data
@@ -160,7 +580,7 @@ class BotStatistics:
                     last_seen = datetime.fromisoformat(user['last_seen'])
                     if (datetime.now() - last_seen).days < 1:
                         self.stats['active_users'].add(user['user_id'])
-
+        
         for group in groups_db:
             if 'chat_id' in group:
                 self.stats['groups'].add(group['chat_id'])
@@ -197,6 +617,15 @@ class BotStatistics:
         elif update_type == 'error':
             self.stats['errors_count'] += 1
             
+        elif update_type == 'ai_request':
+            self.stats['ai_requests'] += 1
+            
+        elif update_type == 'admin_request':
+            self.stats['admin_requests'] += 1
+            
+        elif update_type == 'referral':
+            self.stats['referrals'] += 1
+            
     def get_summary(self) -> Dict:
         """Get statistics summary"""
         return {
@@ -212,7 +641,10 @@ class BotStatistics:
                 key=lambda x: x[1], 
                 reverse=True
             )[:5],
-            'errors_count': self.stats['errors_count']
+            'errors_count': self.stats['errors_count'],
+            'ai_requests': self.stats['ai_requests'],
+            'admin_requests': self.stats['admin_requests'],
+            'referrals': self.stats['referrals']
         }
     
     def get_hourly_activity(self) -> List:
@@ -282,13 +714,17 @@ class AdvancedBotDNA:
                 "prediction": False,
                 "automation": True,
                 "integration": True,
-                "learning": True
+                "learning": True,
+                "ai": bool(OPENAI_API_KEY),
+                "admin_management": True,
+                "referral_system": True
             },
             "traits": {
                 "responsiveness": 0.9,
                 "reliability": 0.95,
                 "innovation": 0.75,
-                "efficiency": 0.85
+                "efficiency": 0.85,
+                "ai_intelligence": 0.6 if OPENAI_API_KEY else 0.0
             }
         }
         
@@ -1509,9 +1945,44 @@ class TaskManager:
 task_manager = TaskManager()
 
 # ==================== ENHANCED HELPER FUNCTIONS ====================
+def escape_markdown_v2(text):
+    """Enhanced markdown escaping for Telegram MarkdownV2"""
+    if not text:
+        return ""
+    
+    # First escape backslashes
+    text = text.replace('\\', '\\\\')
+    
+    # Then escape other special characters for MarkdownV2
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    
+    return text
+
+def escape_markdown(text):
+    """Escape markdown for Telegram (simpler version)"""
+    if not text:
+        return ""
+    
+    # Simple escaping for basic markdown
+    special_chars = ['_', '*', '`', '[']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    
+    return text
+
 def is_admin(user_id):
     """Check if user is admin"""
-    return ADMIN_USER_ID and str(user_id) == ADMIN_USER_ID
+    if ADMIN_USER_ID and str(user_id) == ADMIN_USER_ID:
+        return True
+    
+    # Check if user has admin flag in database
+    for user in users_db:
+        if user['user_id'] == user_id and user.get('is_admin'):
+            return True
+    
+    return False
 
 def should_respond(update):
     """Enhanced response checking with learning patterns"""
@@ -1565,7 +2036,6 @@ def get_or_create_user(user_data, chat_type='private'):
     for user in users_db:
         if user['user_id'] == user_id:
             # Update user info with enhanced data
-            # וודא שה-statistics מכיל את 'commands_used'
             if 'stats' not in user:
                 user['stats'] = {}
             if 'commands_used' not in user['stats']:
@@ -1583,7 +2053,7 @@ def get_or_create_user(user_data, chat_type='private'):
                     'total_interactions': user.get('stats', {}).get('total_interactions', 0) + 1,
                     'last_command': None,
                     'favorite_features': user.get('stats', {}).get('favorite_features', []),
-                    'commands_used': user.get('stats', {}).get('commands_used', {})  # וודא שזה קיים
+                    'commands_used': user.get('stats', {}).get('commands_used', {})
                 }
             }
             user.update(updates)
@@ -1612,13 +2082,14 @@ def get_or_create_user(user_data, chat_type='private'):
         },
         'stats': {
             'total_interactions': 1,
-            'commands_used': {},  # הוסף את זה כאן
+            'commands_used': {},
             'favorite_features': [],
             'engagement_score': 0.5
         },
         'achievements': [],
         'level': 1,
-        'experience': 0
+        'experience': 0,
+        'referral_code': referral_system.generate_referral_code(user_id)
     }
     users_db.append(new_user)
     save_json(USERS_FILE, users_db)
@@ -1707,7 +2178,6 @@ def log_message(update, command=None):
     
     # Update user stats
     if command:
-        # וודא ש-commands_used קיים
         if 'commands_used' not in user_record['stats']:
             user_record['stats']['commands_used'] = {}
         
@@ -1776,23 +2246,6 @@ def log_message(update, command=None):
     logger.info(f"📝 {chat.type.capitalize()} message from {user.first_name}: "
                f"{message.text[:50] if message.text else 'No text'}")
 
-def escape_markdown_v2(text):
-    """Enhanced markdown escaping"""
-    if not text:
-        return ""
-    
-    # Escape special characters for Telegram MarkdownV2
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    
-    # First escape backslashes
-    text = text.replace('\\', '\\\\')
-    
-    # Then escape other special characters
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    
-    return text
-
 # ==================== ENHANCED KEYBOARDS ====================
 def get_main_keyboard(user_id=None):
     """Enhanced main menu keyboard with learning"""
@@ -1814,6 +2267,10 @@ def get_main_keyboard(user_id=None):
         user_patterns = advanced_dna.learning_data.get("user_patterns", {}).get(str(user_id), {})
         if "stock" in str(user_patterns.get("command_frequency", {})):
             base_buttons[1].insert(0, KeyboardButton("📈 מניות"))
+    
+    # Add AI button if available
+    if OPENAI_API_KEY:
+        base_buttons[0].append(KeyboardButton("🤖 AI"))
     
     # Add admin buttons if admin
     if user_id and is_admin(user_id):
@@ -1866,6 +2323,16 @@ def get_task_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+def get_ai_keyboard():
+    """AI features keyboard"""
+    keyboard = [
+        [KeyboardButton("💬 שאל את ה-AI"), KeyboardButton("🧠 ניתוח טקסט")],
+        [KeyboardButton("📝 יצירת תוכן"), KeyboardButton("💡 רעיונות")],
+        [KeyboardButton("🧹 נקה שיחה"), KeyboardButton("⚙️ הגדרות AI")],
+        [KeyboardButton("🏠 לתפריט הראשי"), KeyboardButton("❓ עזרה AI")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
 def get_group_keyboard():
     """Group keyboard"""
     keyboard = [
@@ -1874,6 +2341,477 @@ def get_group_keyboard():
         [KeyboardButton(f"@{BOT_USERNAME} מידע"), KeyboardButton(f"@{BOT_USERNAME} id")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+# ==================== NEW ADMIN REQUEST COMMANDS ====================
+def request_admin_command(update, context):
+    """Command for users to request admin access"""
+    log_message(update, 'request_admin')
+    user = update.effective_user
+    
+    # Check if user already admin
+    if is_admin(user.id):
+        update.message.reply_text(
+            "✅ *אתה כבר מנהל!*\n\n"
+            "יש לך כבר גישה מלאה לפונקציות הניהול.\n"
+            "השתמש ב `/admin` כדי לגשת ללוח הבקרה.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Check if already has pending request
+    pending_requests = admin_request_system.get_pending_requests()
+    for req in pending_requests:
+        if req['user_id'] == user.id:
+            update.message.reply_text(
+                "⏳ *יש לך כבר בקשה ממתינה*\n\n"
+                "בקשתך לגישת אדמין כבר נשלחה ונמצאת בבדיקה.\n"
+                "תקבל הודעה כשתקבל תשובה.\n\n"
+                f"מספר בקשה: #{req['id']}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+    
+    # Ask for reason
+    if not context.args:
+        update.message.reply_text(
+            "👑 *בקשת גישת אדמין*\n\n"
+            "אתה יכול לבקש גישה לפונקציות הניהול של הבוט.\n\n"
+            "*למה כדאי לקבל גישת אדמין?*\n"
+            "✅ גישה לסטטיסטיקות מתקדמות\n"
+            "✅ יכולת לשלוח הודעות לכל המשתמשים\n"
+            "✅ ניהול משתמשים וקבוצות\n"
+            "✅ גישה למערכת ה-DNA והאבולוציה\n"
+            "✅ בקרה על פונקציות AI\n"
+            "✅ השפעה על התפתחות הבוט\n\n"
+            "*דרישות:*\n"
+            "• שימוש פעיל בבוט\n"
+            "• כוונות חיוביות\n"
+            "• נכונות לעזור לאחרים\n\n"
+            "*שימוש:* `/request_admin <סיבה>`\n"
+            "*דוגמה:* `/request_admin אני רוצה לעזור בניהול הקהילה`\n\n"
+            "הבקשה תשלח לבעל הבוט לאישור.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    reason = ' '.join(context.args)
+    
+    # Submit request
+    result = admin_request_system.request_admin_access(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        reason=reason
+    )
+    
+    if result.get("success"):
+        update.message.reply_text(
+            f"✅ *בקשתך נשלחה בהצלחה!*\n\n"
+            f"בקשה #{result['request_id']} נשלחה לבעל הבוט.\n\n"
+            f"📝 *סיבה שסיפקת:*\n{reason[:200]}...\n\n"
+            f"אתה תקבל הודעה כשהבקשה תטופל.\n"
+            f"⏳ זמן טיפול משוער: 24-48 שעות",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        bot_stats.update('admin_request')
+    else:
+        update.message.reply_text(
+            f"❌ *שגיאה בשליחת הבקשה:* {result.get('error', 'Unknown error')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def admin_requests_command(update, context):
+    """View pending admin requests (admin only)"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    log_message(update, 'admin_requests')
+    
+    pending_requests = admin_request_system.get_pending_requests()
+    
+    if not pending_requests:
+        update.message.reply_text(
+            "📭 *אין בקשות ממתינות*\n\n"
+            "כרגע אין בקשות חדשות לגישת אדמין.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    requests_text = f"📋 *בקשות אדמין ממתינות ({len(pending_requests)})*\n\n"
+    
+    for req in pending_requests:
+        time_submitted = datetime.fromisoformat(req['submitted_at'])
+        hours_ago = (datetime.now() - time_submitted).seconds // 3600
+        
+        requests_text += (
+            f"🔸 *בקשה #{req['id']}*\n"
+            f"👤 *משתמש:* {req['first_name']}\n"
+            f"🆔 *ID:* `{req['user_id']}`\n"
+            f"📛 *משתמש:* @{req['username'] or 'ללא'}\n"
+            f"📝 *סיבה:* {req['reason'][:100] if req['reason'] else 'לא צוינה'}...\n"
+            f"⏰ *נשלח לפני:* {hours_ago} שעות\n\n"
+            f"✅ *אשר:* `/approve_admin {req['id']}`\n"
+            f"❌ *דחה:* `/reject_admin {req['id']}`\n"
+            f"────────────────────\n\n"
+        )
+    
+    update.message.reply_text(requests_text, parse_mode=ParseMode.MARKDOWN)
+
+def approve_admin_command(update, context):
+    """Approve admin request (admin only)"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if not context.args:
+        update.message.reply_text(
+            "✅ *אישור בקשה לאדמין*\n\n"
+            "*שימוש:* `/approve_admin <מספר בקשה> [הערות]`\n\n"
+            "*דוגמה:* `/approve_admin 5 משתמש פעיל ואמין`\n\n"
+            "השתמש ב `/admin_requests` כדי לראות את כל הבקשות.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    try:
+        request_id = int(context.args[0])
+        notes = ' '.join(context.args[1:]) if len(context.args) > 1 else ""
+        
+        result = admin_request_system.approve_request(request_id, user.id, notes)
+        
+        if result.get("success"):
+            update.message.reply_text(
+                f"✅ *בקשה #{request_id} אושרה!*\n\n"
+                f"המשתמש עם ID `{result['user_id']}` קיבל גישת אדמין מלאה.\n\n"
+                f"📝 *הערות שנוספו:* {notes if notes else 'ללא'}\n\n"
+                f"המשתמש קיבל הודעה על האישור.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                f"❌ *שגיאה באישור הבקשה:* {result.get('error', 'Unknown error')}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except ValueError:
+        update.message.reply_text(
+            "❌ *מספר בקשה לא תקין*\n\n"
+            "מספר הבקשה חייב להיות מספר שלם.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def reject_admin_command(update, context):
+    """Reject admin request (admin only)"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        update.message.reply_text("❌ *גישה נדחית!*", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if not context.args:
+        update.message.reply_text(
+            "❌ *דחיית בקשה לאדמין*\n\n"
+            "*שימוש:* `/reject_admin <מספר בקשה> [סיבה]`\n\n"
+            "*דוגמה:* `/reject_admin 5 אין מספיק ניסיון`\n\n"
+            "השתמש ב `/admin_requests` כדי לראות את כל הבקשות.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    try:
+        request_id = int(context.args[0])
+        reason = ' '.join(context.args[1:]) if len(context.args) > 1 else ""
+        
+        result = admin_request_system.reject_request(request_id, user.id, reason)
+        
+        if result.get("success"):
+            update.message.reply_text(
+                f"❌ *בקשה #{request_id} נדחתה!*\n\n"
+                f"הבקשה של המשתמש עם ID `{result['user_id']}` נדחתה.\n\n"
+                f"📝 *סיבה לדחייה:* {reason if reason else 'לא צוינה'}\n\n"
+                f"המשתמש קיבל הודעה על הדחייה.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                f"❌ *שגיאה בדחיית הבקשה:* {result.get('error', 'Unknown error')}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except ValueError:
+        update.message.reply_text(
+            "❌ *מספר בקשה לא תקין*\n\n"
+            "מספר הבקשה חייב להיות מספר שלם.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+# ==================== NEW AI COMMANDS ====================
+def ai_command(update, context):
+    """AI chat command"""
+    log_message(update, 'ai')
+    
+    if not OPENAI_API_KEY:
+        update.message.reply_text(
+            "🤖 *AI לא זמין כרגע*\n\n"
+            "מפתח OpenAI API לא הוגדר.\n"
+            "אנא צור קשר עם המנהל כדי להפעיל את פונקציות ה-AI.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if not context.args:
+        help_text = (
+            "🤖 *מערכת AI מתקדמת*\n\n"
+            "אני יכול לעזור לך עם:\n"
+            "• 💬 שאלות כללית וידע כללי\n"
+            "• 🧠 ניתוח טקסט ונתונים\n"
+            "• 📝 כתיבת תוכן ויצירתיות\n"
+            "• 💡 רעיונות ופתרון בעיות\n"
+            "• 🔧 ייעוץ טכנולוגי ותכנות\n"
+            "• 💰 ייעוץ עסקי ופיננסי\n\n"
+            "*שימושים:*\n"
+            "`/ai <שאלה או הודעה>` - שיחה עם AI\n"
+            "`/ai_analyze <טקסט>` - ניתוח טקסט\n"
+            "`/ai_generate <פקודה>` - יצירת תוכן\n"
+            "`/ai_clear` - ניקוי היסטוריית שיחה\n"
+            "`/ai_help` - מדריך מפורט לשימוש ב-AI\n\n"
+            "*דוגמאות:*\n"
+            "`/ai מהו הביטוי המתמטי של משפט פיתגורס?`\n"
+            "`/ai כתוב לי קוד Python למיון מהיר`\n"
+            "`/ai תן לי רעיונות לעסק חדש`\n\n"
+            "*טיפים לשימוש יעיל:*\n"
+            "1. היה ספציפי בשאלות שלך\n"
+            "2. אפשר המשכיות בשיחה\n"
+            "3. בקש הסברים מפורטים כשצריך\n"
+            "4. השתמש בעברית לאבטחת תשובות בעברית"
+        )
+        
+        update.message.reply_text(
+            help_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_ai_keyboard()
+        )
+        return
+    
+    user_message = ' '.join(context.args)
+    user_id = update.effective_user.id
+    
+    # Send processing message
+    processing_msg = update.message.reply_text(
+        "🤖 *האח הגדול חושב...*",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Get AI response
+    result = ai_system.chat_completion(user_id, user_message)
+    
+    if result.get("success"):
+        ai_response = result["response"]
+        tokens_used = result.get("tokens_used", 0)
+        
+        # Format response
+        response_text = f"🤖 *AI עונה:*\n\n{ai_response}\n\n"
+        response_text += f"_🏷️ דגם: {result.get('model', 'gpt-3.5-turbo')} | "
+        response_text += f"טוקנים בשימוש: {tokens_used}_"
+        
+        # Edit processing message with response
+        try:
+            processing_msg.edit_text(response_text, parse_mode=ParseMode.MARKDOWN)
+        except:
+            # If too long, send as new message
+            processing_msg.edit_text("🤖 *התשובה מוכנה!*", parse_mode=ParseMode.MARKDOWN)
+            update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN)
+        
+        bot_stats.update('ai_request')
+        
+    else:
+        error_msg = result.get("error", "שגיאה לא ידועה")
+        processing_msg.edit_text(
+            f"❌ *שגיאה ב-AI:*\n\n{error_msg}\n\n"
+            f"נסה שוב מאוחר יותר או צור קשר עם המנהל.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def ai_help_command(update, context):
+    """Detailed AI help guide"""
+    log_message(update, 'ai_help')
+    
+    help_text = (
+        "📚 *מדריך מפורט לשימוש ב-AI*\n\n"
+        
+        "🌟 *מה אני יכול לעשות?*\n"
+        "1. *שאלות ותשובות* - שאל אותי כל דבר!\n"
+        "2. *כתיבת תוכן* - מאמרים, סיפורים, שירים\n"
+        "3. *תכנות וטכנולוגיה* - כתיבת קוד, פתרון באגים\n"
+        "4. *ייעוץ עסקי* - רעיונות, אסטרטגיות, תכנון\n"
+        "5. *למידה והסברה* - הסבר מושגים, הדרכות\n"
+        "6. *יצירתיות* - רעיונות, שמות, סיסמאות\n\n"
+        
+        "🎯 *טיפים לשימוש יעיל:*\n"
+        "• **היה ספציפי** - שאלות מפורטות מקבלות תשובות טובות יותר\n"
+        "• **המשך שיחה** - אני זוכר את השיחה האחרונה שלנו\n"
+        "• **בקש דוגמאות** - בקש דוגמאות קוד או הסברים מעשיים\n"
+        "• **הגדר הקשר** - ספר לי על המטרה או הרקע\n"
+        "• **שפה עברית** - דבר בעברית לקבלת תשובות בעברית\n\n"
+        
+        "💡 *דוגמאות מצוינות:*\n"
+        "✅ *טוב:* `כתוב לי פונקציית Python שמחשבת עצרת`\n"
+        "✅ *מצוין:* `הסבר לי כמו ילד בן 5 מהו ביטקוין`\n"
+        "✅ *מעולה:* `תן לי 10 רעיונות לשמות לחברה טכנולוגית`\n"
+        "✅ *מושלם:* `כתוב מאמר בן 300 מילה על חשיבות הבינה המלאכותית`\n\n"
+        
+        "🔧 *פקודות AI נוספות:*\n"
+        "• `/ai_clear` - נקה את היסטוריית השיחה שלך\n"
+        "• `/ai_analyze <טקסט>` - ניתוח סנטימנט ומידע\n"
+        "• `/ai_generate <סוג> <תיאור>` - יצירת תוכן\n"
+        "• `/ai_stats` - סטטיסטיקות שימוש ב-AI\n\n"
+        
+        "⚙️ *מערכת AI מתקדמת:*\n"
+        "• 🤖 מבוסס על OpenAI GPT\n"
+        "• 💾 זיכרון שיחה קצר-טווח\n"
+        "• 🌐 תמיכה בשפות מרובות\n"
+        "• 🔒 פרטיות ואבטחה\n\n"
+        
+        "📞 *תמיכה:*\n"
+        "אם נתקלת בבעיות או יש לך הצעות לשיפור,\n"
+        "צור קשר עם המנהל באמצעות `/contact`"
+    )
+    
+    update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+def ai_clear_command(update, context):
+    """Clear AI conversation history"""
+    log_message(update, 'ai_clear')
+    user_id = update.effective_user.id
+    
+    result = ai_system.clear_conversation(user_id)
+    
+    if result.get("success"):
+        update.message.reply_text(
+            "🧹 *היסטוריית השיחה נוקתה!*\n\n"
+            "השיחה שלך עם ה-AI אופסה.\n"
+            "אתה יכול להתחיל שיחה חדשה מחדש.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        update.message.reply_text(
+            "ℹ️ *לא נמצאה היסטוריית שיחה לנקות*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+def ai_analyze_command(update, context):
+    """Analyze text with AI"""
+    log_message(update, 'ai_analyze')
+    
+    if not OPENAI_API_KEY:
+        update.message.reply_text(
+            "❌ *AI לא זמין כרגע*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if not context.args:
+        update.message.reply_text(
+            "🧠 *ניתוח טקסט עם AI*\n\n"
+            "*שימוש:* `/ai_analyze <טקסט לניתוח>`\n\n"
+            "*דוגמאות:*\n"
+            "`/ai_analyze אני מאוד מרוצה מהמוצר החדש!`\n"
+            "`/ai_analyze המאמר מדבר על חשיבות הקיימות`\n\n"
+            "*מה אני יכול לנתח:*\n"
+            "• סנטימנט (חיובי/שלילי/ניטרלי)\n"
+            "• נושאים מרכזיים\n"
+            "• מילות מפתח\n"
+            "• טון וסגנון",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    text = ' '.join(context.args)
+    user_id = update.effective_user.id
+    
+    processing_msg = update.message.reply_text(
+        "🧠 *מנתח טקסט...*",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Use chat completion for analysis
+    prompt = f"בצע ניתוח מפורט של הטקסט הבא בעברית:\n{text}\n\nהניתוח צריך לכלול:\n1. סנטימנט (חיובי/שלילי/ניטרלי)\n2. נושאים מרכזיים\n3. מילות מפתח חשובות\n4. טון וסגנון\n5. תובנות מעניינות"
+    
+    result = ai_system.chat_completion(user_id, prompt)
+    
+    if result.get("success"):
+        analysis = result["response"]
+        
+        response_text = f"📊 *ניתוח טקסט עם AI:*\n\n{analysis}\n\n"
+        response_text += f"_טקסט שנבדק: '{text[:100]}...'_"
+        
+        processing_msg.edit_text(response_text, parse_mode=ParseMode.MARKDOWN)
+        bot_stats.update('ai_request')
+    else:
+        processing_msg.edit_text(
+            f"❌ *שגיאה בניתוח:* {result.get('error', 'Unknown error')}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+# ==================== REFERRAL COMMANDS ====================
+def referral_command(update, context):
+    """Referral system command"""
+    log_message(update, 'referral')
+    user = update.effective_user
+    user_id = user.id
+    
+    # Get user's referral stats
+    stats = referral_system.get_user_stats(user_id)
+    
+    if not stats:
+        # Generate new referral code if doesn't exist
+        code = referral_system.generate_referral_code(user_id)
+        stats = referral_system.get_user_stats(user_id)
+    
+    referral_text = (
+        f"📣 *מערכת ההפניות של {BOT_NAME}*\n\n"
+        f"🎉 *שתף את הבוט עם חברים וקבל פרסים!*\n\n"
+    )
+    
+    if stats:
+        referral_text += (
+            f"🔑 *קוד ההפניה שלך:*\n`{stats['code']}`\n\n"
+            f"📊 *סטטיסטיקות הפניות:*\n"
+            f"• 👥 משתמשים שהצטרפו: {stats['total_referrals']}\n"
+            f"• 📅 קוד נוצר: {datetime.fromisoformat(stats['generated_at']).strftime('%d/%m/%Y')}\n\n"
+        )
+    
+    referral_text += (
+        f"🎁 *איך זה עובד:*\n"
+        f"1. שתף את קוד ההפניה שלך עם חברים\n"
+        f"2. חברים מצטרפים עם הקוד שלך\n"
+        f"3. אתה מקבל 100 נקודות בונוס לכל הצטרפות!\n\n"
+        
+        f"💬 *איך לשתף:*\n"
+        f"*העתק את ההודעה הזו:*\n\n"
+        f"היי! אני משתמש בבוט Telegram מדהים בשם {BOT_NAME}!\n"
+        f"🤖 הבוט יכול:\n"
+        f"• 📈 ניתוח מניות ופיננסים\n"
+        f"• 🎮 משחקי quiz וטריוויה\n"
+        f"• 📝 ניהול משימות\n"
+        f"• 🤖 AI מתקדם\n"
+        f"• 🧬 מערכת DNA אבולוציונית\n\n"
+        f"הוסף את הבוט כאן: t.me/{BOT_USERNAME}\n"
+        f"והשתמש בקוד ההפנה שלי: `{stats['code'] if stats else 'טוען...'}`\n\n"
+        
+        f"🏆 *הטבות:*\n"
+        f"• 100 נקודות בונוס לכל הפניה\n"
+        f"• דירוג גבוה יותר בטבלת השיאים\n"
+        f"• גישה מוקדמת לתכונות חדשות\n"
+        f"• הכרה כמתרומה לקהילה\n\n"
+        
+        f"📌 *הערה:* נקודות הבונוס יכולות לשמש לפתיחת תכונות מיוחדות ולשדרוגים עתידיים."
+    )
+    
+    update.message.reply_text(referral_text, parse_mode=ParseMode.MARKDOWN)
 
 # ==================== MISSING FUNCTIONS ====================
 def show_id(update, context):
@@ -1924,7 +2862,10 @@ def about_command(update, context):
         f"• 🎮 משחקי quiz וטריוויה\n"
         f"• 📝 ניהול משימות ותזכורות\n"
         f"• 📊 סטטיסטיקות מתקדמות\n"
-        f"• 🧠 למידה מדפוסי משתמשים\n\n"
+        f"• 🧠 למידה מדפוסי משתמשים\n"
+        f"• 🤖 AI מתקדם עם OpenAI\n"
+        f"• 👑 מערכת בקשות לאדמין\n"
+        f"• 📣 מערכת הפניות\n\n"
         f"🔄 *אבולוציה אוטומטית:*\n"
         f"הבוט משתפר כל הזמן! כל אינטראקציה תורמת להתפתחות שלו.\n\n"
         f"👨‍💻 *מפתח:* מערכת DNA אוטונומית\n"
@@ -1932,11 +2873,13 @@ def about_command(update, context):
         f"📍 *גרסאות:*\n"
         f"• Telegram Bot: python-telegram-bot\n"
         f"• DNA System: v2.0\n"
-        f"• Evolution Engine: גנרטיבי\n\n"
+        f"• Evolution Engine: גנרטיבי\n"
+        f"• AI System: OpenAI GPT\n\n"
         f"🤝 *עקרונות:*\n"
         f"• שקיפות - כל המידע זמין ב-/dna\n"
         f"• למידה - שיפור מתמשך\n"
-        f"• שירות - עזרה למשתמשים\n\n"
+        f"• שירות - עזרה למשתמשים\n"
+        f"• קהילתיות - שיתוף ועזרה הדדית\n\n"
         f"📞 *תמיכה:*\n"
         f"השתמש ב /help לרשימת פקודות\n"
         f"השתמש ב /dna למידע אבולוציוני"
@@ -1977,7 +2920,8 @@ def admin_stats(update, context):
         'messages': len(messages_db),
         'groups': len(groups_db),
         'tasks': len(tasks_db),
-        'quiz_scores': sum(len(scores) for scores in quiz_scores_db.values())
+        'quiz_scores': sum(len(scores) for scores in quiz_scores_db.values()),
+        'admin_requests': len(admin_requests_db)
     }
     
     stats_text = (
@@ -1993,11 +2937,10 @@ def admin_stats(update, context):
         f"• 👥 קבוצות פעילות: {len(bot_stats.stats['groups'])}\n"
         f"• 🚀 התחלות: {stats['start_count']}\n"
         f"• 📝 פקודות: {stats['commands_count']}\n"
-        f"• ❌ שגיאות: {stats['errors_count']}\n\n"
-        
-        f"🕐 *פעילות לפי שעות:*\n"
-        f"• 🏆 שעת שיא: {peak_hour['hour']}:00 עם {peak_hour['count']} הודעות\n"
-        f"• 📊 ממוצע לשעה: {stats['total_messages'] / max(1, bot_stats.stats['uptime_seconds'] / 3600):.1f}\n\n"
+        f"• ❌ שגיאות: {stats['errors_count']}\n"
+        f"• 🤖 בקשות AI: {stats['ai_requests']}\n"
+        f"• 👑 בקשות אדמין: {stats['admin_requests']}\n"
+        f"• 📣 הפניות: {stats['referrals']}\n\n"
     )
     
     # Top commands
@@ -2012,7 +2955,8 @@ def admin_stats(update, context):
                 'trivia': 'טריוויה',
                 'task': 'משימות',
                 'dna': 'DNA',
-                'menu': 'תפריט'
+                'menu': 'תפריט',
+                'ai': 'AI'
             }.get(cmd, cmd)
             stats_text += f"• {cmd_name}: {count}\n"
         stats_text += "\n"
@@ -2037,7 +2981,8 @@ def admin_stats(update, context):
             'messages': 'הודעות',
             'groups': 'קבוצות',
             'tasks': 'משימות',
-            'quiz_scores': 'תוצאות quiz'
+            'quiz_scores': 'תוצאות quiz',
+            'admin_requests': 'בקשות אדמין'
         }.get(key, key)
         stats_text += f"• {hebrew_name}: {value}\n"
     
@@ -2047,7 +2992,6 @@ def admin_stats(update, context):
     
     stats_text += f"\n🏥 *בריאות מערכת:* {health_emoji}\n"
     stats_text += f"• שגיאות: {error_rate:.2f}%\n"
-    stats_text += f"• זיכרון משוער: {sum(len(str(item)) for item in users_db[:100]) // 1024}KB\n"
     
     update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -2192,6 +3136,7 @@ def users_command(update, context):
         active_users = len([u for u in users_db 
                           if u.get('last_seen') and 
                           (datetime.now() - datetime.fromisoformat(u['last_seen'])).days < 1])
+        admin_count = len([u for u in users_db if u.get('is_admin')])
         
         users_text = (
             f"👥 *ניהול משתמשים*\n\n"
@@ -2199,7 +3144,7 @@ def users_command(update, context):
             f"• 👤 משתמשים רשומים: {total_users}\n"
             f"• 👥 פעילים היום: {active_users}\n"
             f"• 📅 פעילים השבוע: {len([u for u in users_db if u.get('last_seen') and (datetime.now() - datetime.fromisoformat(u['last_seen'])).days < 7])}\n"
-            f"• 👑 מנהלים: {len([u for u in users_db if u.get('is_admin')])}\n\n"
+            f"• 👑 מנהלים: {admin_count}\n\n"
             f"⚙️ *פקודות ניהול:*\n"
             f"`/users list` - רשימת משתמשים\n"
             f"`/users stats` - סטטיסטיקות מפורטות\n"
@@ -2310,11 +3255,22 @@ def users_command(update, context):
         stats_text += f"• סה״כ הודעות: {total_messages}\n"
         stats_text += f"• ממוצע למשתמש: {avg_messages:.1f}\n\n"
         
+        # Admin statistics
+        admin_users = [u for u in users_db if u.get('is_admin')]
+        stats_text += f"👑 *סטטיסטיקות מנהלים:*\n"
+        stats_text += f"• סה״כ מנהלים: {len(admin_users)}\n"
+        
+        if admin_users:
+            admin_names = ', '.join([u.get('first_name', 'ללא שם') for u in admin_users[:5]])
+            stats_text += f"• מנהלים: {admin_names}"
+            if len(admin_users) > 5:
+                stats_text += f" + {len(admin_users) - 5} נוספים\n"
+        
         # Top active users
         active_users = sorted(users_db, key=lambda x: x.get('message_count', 0), reverse=True)[:5]
         
         if active_users:
-            stats_text += f"🏆 *משתמשים פעילים ביותר:*\n"
+            stats_text += f"\n🏆 *משתמשים פעילים ביותר:*\n"
             for i, user_data in enumerate(active_users):
                 name = user_data.get('first_name', 'ללא שם')
                 count = user_data.get('message_count', 0)
@@ -2506,6 +3462,7 @@ def export_command(update, context):
         'tasks': ('משימות', tasks_db),
         'quiz': ('תוצאות quiz', quiz_scores_db),
         'broadcasts': ('שידורים', broadcasts_db),
+        'admin_requests': ('בקשות אדמין', admin_requests_db),
         'all': ('הכל', {
             'users': users_db,
             'messages': messages_db[-1000:] if len(messages_db) > 1000 else messages_db,
@@ -2513,6 +3470,7 @@ def export_command(update, context):
             'tasks': tasks_db,
             'quiz_scores': quiz_scores_db,
             'broadcasts': broadcasts_db,
+            'admin_requests': admin_requests_db,
             'dna': advanced_dna.dna,
             'stats': bot_stats.stats
         })
@@ -2571,7 +3529,7 @@ def export_command(update, context):
     except Exception as e:
         logger.error(f"Export failed: {e}")
         update.message.reply_text(
-            f"❌ *יצוא נכשל:* {str(e)}",
+            f"❌ *יצוא נכשלה:* {str(e)}",
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -2596,6 +3554,8 @@ def restart_command(update, context):
     save_json(MESSAGES_FILE, messages_db)
     save_json(TASKS_FILE, tasks_db)
     save_json(QUIZ_FILE, quiz_scores_db)
+    save_json(ADMIN_REQUESTS_FILE, admin_requests_db)
+    save_json(AI_CONVERSATIONS_FILE, ai_conversations_db)
     
     # Record restart in DNA
     advanced_dna.record_intelligent_mutation(
@@ -2716,6 +3676,34 @@ def register_existing_modules():
         complexity=2
     )
     
+    # AI module
+    if OPENAI_API_KEY:
+        advanced_dna.register_advanced_module(
+            module_name="ai_intelligence",
+            module_type="ai",
+            functions=["chat_completion", "sentiment_analysis", "content_generation"],
+            dependencies=["core_bot_enhanced"],
+            complexity=4
+        )
+    
+    # Admin request module
+    advanced_dna.register_advanced_module(
+        module_name="admin_request_system",
+        module_type="management",
+        functions=["request_admin", "approve_admin", "reject_admin", "view_requests"],
+        dependencies=["core_bot_enhanced", "user_management_pro"],
+        complexity=3
+    )
+    
+    # Referral module
+    advanced_dna.register_advanced_module(
+        module_name="referral_system",
+        module_type="community",
+        functions=["generate_referral", "register_referral", "get_stats"],
+        dependencies=["core_bot_enhanced"],
+        complexity=2
+    )
+    
     logger.info("🧬 Registered enhanced modules in DNA")
 
 def auto_evolve_check():
@@ -2817,7 +3805,9 @@ def dna_command(update, context):
     dna_text += f"• ⚡ תגובתיות: {traits.get('responsiveness', 0)*100:.0f}%\n"
     dna_text += f"• ✅ אמינות: {traits.get('reliability', 0)*100:.0f}%\n"
     dna_text += f"• 💡 חדשנות: {traits.get('innovation', 0)*100:.0f}%\n"
-    dna_text += f"• 🏃 יעילות: {traits.get('efficiency', 0)*100:.0f}%\n\n"
+    dna_text += f"• 🏃 יעילות: {traits.get('efficiency', 0)*100:.0f}%\n"
+    if traits.get('ai_intelligence', 0) > 0:
+        dna_text += f"• 🤖 אינטליגנציית AI: {traits.get('ai_intelligence', 0)*100:.0f}%\n\n"
     
     # Recent mutations
     recent_muts = report.get("recent_mutations", [])
@@ -2825,7 +3815,8 @@ def dna_command(update, context):
         dna_text += f"*מוטציות אחרונות:*\n"
         for mut in recent_muts[-3:]:
             mut_time = datetime.fromisoformat(mut['timestamp']).strftime('%d/%m')
-            dna_text += f"• {mut['type']} ({mut_time}) - {mut.get('impact', 'medium')}\n"
+            dna_text += f"• {mut.get('type', 'unknown')} "
+            dna_text += f"({mut_time}) - {mut.get('impact', 'medium')}\n"
     
     # Learning insights
     insights = report.get("learning_insights", {})
@@ -2837,7 +3828,18 @@ def dna_command(update, context):
     caps = report.get("capabilities", {})
     enabled_caps = [k for k, v in caps.items() if v]
     if enabled_caps:
-        dna_text += f"\n*יכולות מופעלות:* {', '.join(enabled_caps)}\n"
+        cap_names = {
+            'nlp': 'עיבוד שפה',
+            'prediction': 'חיזוי',
+            'automation': 'אוטומציה',
+            'integration': 'אינטגרציה',
+            'learning': 'למידה',
+            'ai': 'AI מתקדם',
+            'admin_management': 'ניהול אדמין',
+            'referral_system': 'מערכת הפניות'
+        }
+        enabled_names = [cap_names.get(c, c) for c in enabled_caps]
+        dna_text += f"\n*יכולות מופעלות:* {', '.join(enabled_names)}\n"
     
     dna_text += f"\n_זמן מעודכן: {datetime.now().strftime('%H:%M')}_"
     
@@ -4022,7 +5024,9 @@ def profile_command(update, context):
                 'stock': 'מניות',
                 'quiz': 'משחק',
                 'trivia': 'טריוויה',
-                'task': 'משימות'
+                'task': 'משימות',
+                'ai': 'AI',
+                'dna': 'DNA'
             }.get(cmd, cmd)
             profile_text += f"• {cmd_name}: {count} פעמים\n"
     
@@ -4056,6 +5060,8 @@ def profile_command(update, context):
         achievements.append("⭐ ותיק")
     if engagement >= 80:
         achievements.append("📊 פעיל מאוד")
+    if user_record.get('is_admin'):
+        achievements.append("👑 מנהל")
     
     if achievements:
         profile_text += f"\n*🏅 הישגים:* {' '.join(achievements)}"
@@ -4082,7 +5088,10 @@ def start(update, context):
             f"• 🎮 משחקי quiz וטריוויה\n"
             f"• 📝 ניהול משימות ותזכורות\n"
             f"• 📊 סטטיסטיקות וניתוח נתונים\n"
-            f"• 🧬 מערכת DNA אבולוציונית מתקדמת\n\n"
+            f"• 🧬 מערכת DNA אבולוציונית מתקדמת\n"
+            f"• 🤖 AI מתקדם עם OpenAI\n"
+            f"• 👑 מערכת בקשות לאדמין\n"
+            f"• 📣 מערכת הפניות ופרסים\n\n"
             f"🔄 *הבוט שלי מתפתח ומשתפר אוטומטית* \n"
             f"בהתבסס על השימוש שלך ושל אחרים!\n\n"
             f"📋 *השתמש בתפריט למטה או בפקודות:*\n"
@@ -4090,10 +5099,14 @@ def start(update, context):
             f"/menu - תפריט כפתורים\n"
             f"/features - תכונות מיוחדות\n"
             f"/dna - מערכת ה-DNA של הבוט\n"
+            f"/ai - מערכת AI מתקדמת\n"
+            f"/referral - מערכת הפניות"
         )
         
         if is_admin(user.id):
             welcome_text += "\n👑 *גישה למנהל זוהתה!*\nהשתמש בתפריט המנהל או ב-/admin"
+        else:
+            welcome_text += f"\n👑 *רוצה גישת אדמין?*\nהשתמש ב `/request_admin` כדי לבקש גישה!"
         
         update.message.reply_text(
             welcome_text,
@@ -4140,7 +5153,8 @@ def help_command(update, context):
             "/profile - הפרופיל שלך\n"
             "/id - הצג את ה-ID שלך\n"
             "/info - סטטיסטיקות בוט\n"
-            "/ping - בדיקת חיים\n\n"
+            "/ping - בדיקת חיים\n"
+            "/features - תכונות מיוחדות\n\n"
             "💰 *פיננסים ומניות:*\n"
             "/stock <סימבול> - מחיר מניה\n"
             "/analyze <סימבול> - ניתוח מניה\n"
@@ -4156,15 +5170,30 @@ def help_command(update, context):
             "/task new <תיאור> - משימה חדשה\n"
             "/task list - רשימת משימות\n"
             "/task stats - סטטיסטיקות\n\n"
+            "🤖 *AI מתקדם:*\n"
+            "/ai <שאלה> - שאל את ה-AI\n"
+            "/ai_help - מדריך לשימוש ב-AI\n"
+            "/ai_clear - נקה היסטוריית שיחה\n"
+            "/ai_analyze <טקסט> - ניתוח טקסט\n\n"
             "🧬 *אבולוציה ו-DNA:*\n"
             "/dna - מערכת DNA\n"
             "/evolve - ניהול אבולוציה\n"
             "/lineage - שושלת מודולים\n\n"
+            "👑 *בקשות אדמין:*\n"
+            "/request_admin <סיבה> - בקש גישת אדמין\n"
+            "/admin_requests - צפה בבקשות (מנהלים)\n"
+            "/approve_admin <מספר> - אשר בקשה (מנהלים)\n"
+            "/reject_admin <מספר> - דחה בקשה (מנהלים)\n\n"
+            "📣 *קהילה והפניה:*\n"
+            "/referral - מערכת הפניות\n"
+            "/share - שתף את הבוט\n\n"
             "👑 *פקודות מנהל:*\n"
             "/admin - לוח בקרה\n"
             "/stats - סטטיסטיקות מפורטות\n"
             "/broadcast - שידור לכולם\n"
-            "/users - ניהול משתמשים\n\n"
+            "/users - ניהול משתמשים\n"
+            "/export - יצוא נתונים\n"
+            "/restart - אתחול מערכת\n\n"
             "💡 *בקבוצות:*\n"
             f"הזכירו אותי עם @{BOT_USERNAME}\n"
             "או השתמשו בפקודות ישירות\n\n"
@@ -4216,7 +5245,10 @@ def features_command(update, context):
             'prediction': '🔮', 
             'automation': '⚙️',
             'integration': '🔗',
-            'learning': '🧠'
+            'learning': '🧠',
+            'ai': '🤖',
+            'admin_management': '👑',
+            'referral_system': '📣'
         }
         
         for feature in enabled_features:
@@ -4226,7 +5258,10 @@ def features_command(update, context):
                 'prediction': 'חיזוי וניתוח',
                 'automation': 'אוטומציה',
                 'integration': 'אינטגרציה',
-                'learning': 'למידה מתמדת'
+                'learning': 'למידה מתמדת',
+                'ai': 'AI מתקדם',
+                'admin_management': 'ניהול אדמין',
+                'referral_system': 'מערכת הפניות'
             }.get(feature, feature)
             features_text += f"{emoji} {hebrew_name}\n"
     
@@ -4242,8 +5277,18 @@ def features_command(update, context):
     # Task management
     features_text += "• 📝 ניהול משימות ותזכורות\n"
     
+    # AI system
+    if OPENAI_API_KEY:
+        features_text += "• 🤖 AI מתקדם עם OpenAI\n"
+    
     # Evolution system
     features_text += "• 🧬 DNA אבולוציוני מתקדם\n"
+    
+    # Admin request system
+    features_text += "• 👑 מערכת בקשות לאדמין\n"
+    
+    # Referral system
+    features_text += "• 📣 מערכת הפניות ופרסים\n"
     
     # Learning system
     features_text += "• 📊 ניתוח דפוסי משתמשים\n"
@@ -4298,7 +5343,9 @@ def menu_command(update, context):
             'quiz': '🎮 quiz',
             'task': '📝 משימות', 
             'trivia': '❓ טריוויה',
-            'exchange': '💱 מטבעות'
+            'exchange': '💱 מטבעות',
+            'ai': '🤖 AI',
+            'dna': '🧬 DNA'
         }
         
         for feature in favorite_features:
@@ -4326,9 +5373,18 @@ def menu_command(update, context):
         f"• משימות - ניהול מטלות\n"
         f"• תזכורות - התראות\n\n"
         
+        f"🤖 *AI מתקדם:*\n"
+        f"• שאל את ה-AI - שיחות חכמות\n"
+        f"• ניתוח טקסט - הבנה עמוקה\n"
+        f"• יצירת תוכן - כתיבה ורעיונות\n\n"
+        
         f"🧬 *אבולוציה:*\n"
         f"• DNA - מערכת אבולוציונית\n"
         f"• תכונות מיוחדות - יכולות מתקדמות\n"
+        
+        f"👑 *קהילה:*\n"
+        f"• בקשות אדמין - בקש הרשאות\n"
+        f"• הפניות - שתף וקבל פרסים\n"
     )
     
     if is_admin(user.id):
@@ -4371,7 +5427,10 @@ def bot_info(update, context):
         f"• 👥 קבוצות פעילות: {len(bot_stats.stats['groups'])}\n"
         f"• 🚀 פקודות /start: {stats['start_count']}\n"
         f"• 📝 פקודות סה״כ: {stats['commands_count']}\n"
-        f"• ⚡ תגובה: {avg_response}\n\n"
+        f"• ⚡ תגובה: {avg_response}\n"
+        f"• 🤖 בקשות AI: {stats['ai_requests']}\n"
+        f"• 👑 בקשות אדמין: {stats['admin_requests']}\n"
+        f"• 📣 הפניות: {stats['referrals']}\n\n"
     )
     
     # Top features
@@ -4385,7 +5444,8 @@ def bot_info(update, context):
                 'quiz': 'Quiz',
                 'trivia': 'טריוויה',
                 'task': 'משימות',
-                'dna': 'DNA'
+                'dna': 'DNA',
+                'ai': 'AI'
             }.get(cmd, cmd)
             info_text += f"• {cmd_name}: {count}\n"
     
@@ -4584,6 +5644,9 @@ def handle_text(update, context):
             reply_markup=get_financial_keyboard()
         )
     
+    elif text == "🤖 ai":
+        ai_command(update, context)
+    
     elif text == "👤 הפרופיל שלי":
         profile_command(update, context)
     
@@ -4612,7 +5675,8 @@ def handle_text(update, context):
             f"• Webhook: {'מוגדר ✅' if WEBHOOK_URL else 'לא מוגדר'}\n"
             f"• סוד Webhook: {'מוגדר ✅' if WEBHOOK_SECRET else 'לא מוגדר'}\n"
             f"• מנהל: {ADMIN_USER_ID}\n"
-            f"• API מניות: {'פעיל ✅' if ALPHAVANTAGE_API_KEY else 'לא מוגדר'}\n\n"
+            f"• API מניות: {'פעיל ✅' if ALPHAVANTAGE_API_KEY else 'לא מוגדר'}\n"
+            f"• API OpenAI: {'פעיל ✅' if OPENAI_API_KEY else 'לא מוגדר'}\n\n"
             f"💾 *מאגר נתונים:*\n"
             f"• משתמשים: {len(users_db)}\n"
             f"• קבוצות: {len(groups_db)}\n"
@@ -4620,6 +5684,38 @@ def handle_text(update, context):
             f"• משימות: {len(tasks_db)}\n",
             parse_mode=ParseMode.MARKDOWN
         )
+    
+    # AI submenu buttons
+    elif text == "💬 שאל את ה-ai":
+        update.message.reply_text(
+            "🤖 *שאל את ה-AI*\n\n"
+            "הקלד שאלה או הודעה ואני אענה לך!\n\n"
+            "*דוגמאות:*\n"
+            "מהו הביטוי המתמטי של משפט פיתגורס?\n"
+            "כתוב לי קוד Python למיון מהיר\n"
+            "תן לי רעיונות לעסק חדש\n\n"
+            "אפשר גם להשתמש ב: `/ai <שאלה>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif text == "🧠 ניתוח טקסט":
+        update.message.reply_text(
+            "🧠 *ניתוח טקסט עם AI*\n\n"
+            "העתק טקסט ואני אנתח אותו עבורך!\n\n"
+            "*שימוש:* `/ai_analyze <טקסט>`\n\n"
+            "*מה אני יכול לנתח:*\n"
+            "• סנטימנט (חיובי/שלילי/ניטרלי)\n"
+            "• נושאים מרכזיים\n"
+            "• מילות מפתח\n"
+            "• טון וסגנון",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif text == "🧹 נקה שיחה":
+        ai_clear_command(update, context)
+    
+    elif text == "❓ עזרה ai":
+        ai_help_command(update, context)
     
     # Handle group mentions
     elif BOT_USERNAME and f"@{BOT_USERNAME}" in message.text:
@@ -4664,6 +5760,16 @@ def handle_text(update, context):
                 parse_mode=ParseMode.MARKDOWN
             )
         
+        elif "ai" in mentioned_text or "בינה" in mentioned_text:
+            update.message.reply_text(
+                f"🤖 *AI מתקדם זמין!*\n\n"
+                f"אני יכול לעזור עם שאלות, ניתוח טקסט, כתיבת קוד ועוד.\n\n"
+                f"*שימוש:* `/ai <שאלה>`\n"
+                f"*דוגמה:* `/ai מהו משפט פיתגורס?`\n\n"
+                f"למידע נוסף: `/ai_help`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
         elif "בוט" in mentioned_text or "רובוט" in mentioned_text:
             update.message.reply_text(
                 f"🤖 *כן, אני {BOT_NAME}!*\n\n"
@@ -4671,7 +5777,9 @@ def handle_text(update, context):
                 f"• 📈 ניתוח מניות\n"
                 f"• 🎮 משחקי quiz\n"
                 f"• 📝 ניהול משימות\n"
-                f"• 🧬 מערכת DNA אבולוציונית\n\n"
+                f"• 🤖 AI מתקדם\n"
+                f"• 🧬 מערכת DNA אבולוציונית\n"
+                f"• 👑 מערכת בקשות אדמין\n\n"
                 f"השתמש ב @{BOT_USERNAME} עזרה כדי לראות את כל הפקודות.",
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -4712,6 +5820,9 @@ def handle_text(update, context):
         if user_patterns.get("command_frequency", {}).get("stock", 0) > 1:
             response += f"💹 *טיפ:* בדוק מניה עם `/stock AAPL`\n\n"
         
+        if user_patterns.get("command_frequency", {}).get("ai", 0) > 0:
+            response += f"🤖 *טיפ:* שאל את ה-AI עם `/ai <שאלה>`\n\n"
+        
         response += f"🤖 *ID הבוט:* `{BOT_ID}`\n"
         response += f"📊 *הודעה #{bot_stats.stats['message_count']} שלך*"
         
@@ -4745,13 +5856,18 @@ def admin_panel(update, context):
         f"• 👥 קבוצות: {len(bot_stats.stats['groups'])}\n"
         f"• 🚀 התחלות: {stats['start_count']}\n"
         f"• 📢 שידורים: {len(broadcasts_db)}\n"
-        f"• ❌ שגיאות: {stats['errors_count']}\n\n"
+        f"• ❌ שגיאות: {stats['errors_count']}\n"
+        f"• 🤖 בקשות AI: {stats['ai_requests']}\n"
+        f"• 👑 בקשות אדמין: {stats['admin_requests']}\n"
+        f"• 📣 הפניות: {stats['referrals']}\n\n"
         
         f"⚙️ *פעולות מנהל מתקדמות:*\n"
         "השתמש בתפריט למטה או בפקודות:\n"
         "/stats - סטטיסטיקות מפורטות\n"
         "/broadcast - שידור לכולם\n"
         "/users - ניהול משתמשים\n"
+        "/admin_requests - ניהול בקשות אדמין\n"
+        "/export - יצוא נתונים\n"
         "/system_check - בדיקת מערכת\n"
         "/dna_report - דוח DNA\n"
         "/evolution_status - סטטוס אבולוציה\n"
@@ -4785,6 +5901,21 @@ dispatcher.add_handler(CommandHandler("trivia", trivia_command))
 dispatcher.add_handler(CommandHandler("leaderboard", leaderboard_command))
 dispatcher.add_handler(CommandHandler("answer", answer_command))
 dispatcher.add_handler(CommandHandler("task", task_command))
+
+# AI commands
+dispatcher.add_handler(CommandHandler("ai", ai_command, pass_args=True))
+dispatcher.add_handler(CommandHandler("ai_help", ai_help_command))
+dispatcher.add_handler(CommandHandler("ai_clear", ai_clear_command))
+dispatcher.add_handler(CommandHandler("ai_analyze", ai_analyze_command, pass_args=True))
+
+# Admin request commands
+dispatcher.add_handler(CommandHandler("request_admin", request_admin_command, pass_args=True))
+dispatcher.add_handler(CommandHandler("admin_requests", admin_requests_command))
+dispatcher.add_handler(CommandHandler("approve_admin", approve_admin_command, pass_args=True))
+dispatcher.add_handler(CommandHandler("reject_admin", reject_admin_command, pass_args=True))
+
+# Referral commands
+dispatcher.add_handler(CommandHandler("referral", referral_command))
 
 # DNA evolution commands
 dispatcher.add_handler(CommandHandler("dna", dna_command))
@@ -4838,7 +5969,10 @@ def home():
             "active_users": stats['active_users'],
             "active_groups": len(bot_stats.stats['groups']),
             "starts": stats['start_count'],
-            "commands": stats['commands_count']
+            "commands": stats['commands_count'],
+            "ai_requests": stats['ai_requests'],
+            "admin_requests": stats['admin_requests'],
+            "referrals": stats['referrals']
         },
         "storage": {
             "users": len(users_db),
@@ -4847,7 +5981,8 @@ def home():
             "groups": len(groups_db),
             "stocks": len(stocks_db),
             "tasks": len(tasks_db),
-            "quiz_scores": len(quiz_scores_db)
+            "quiz_scores": len(quiz_scores_db),
+            "admin_requests": len(admin_requests_db)
         },
         "dna": {
             "generation": dna_report['dna_info']['generation'],
@@ -4858,11 +5993,14 @@ def home():
         },
         "features": {
             "financial": bool(ALPHAVANTAGE_API_KEY),
+            "ai": bool(OPENAI_API_KEY),
             "quiz_games": True,
             "task_management": True,
             "dna_evolution": True,
             "learning_system": True,
             "admin_tools": True,
+            "admin_requests": True,
+            "referral_system": True,
             "broadcast": True,
             "group_management": True
         },
@@ -4946,7 +6084,8 @@ def health():
                 "api_connections": api_status,
                 "memory_usage": len(users_db) + len(messages_db),
                 "active_games": len(quiz_system.active_games),
-                "scheduled_tasks": len([t for t in tasks_db if not t.get('completed')])
+                "scheduled_tasks": len([t for t in tasks_db if not t.get('completed')]),
+                "pending_admin_requests": len(admin_request_system.get_pending_requests())
             },
             "stats": {
                 "messages": bot_stats.stats['message_count'],
@@ -4983,15 +6122,7 @@ def system_status():
     # Calculate system metrics
     active_tasks = len([t for t in tasks_db if not t.get('completed')])
     active_games = len(quiz_system.active_games)
-    
-    # Memory usage estimation
-    memory_estimation = {
-        "users": len(users_db) * 500,  # ~500 bytes per user
-        "messages": len(messages_db) * 200,  # ~200 bytes per message
-        "tasks": len(tasks_db) * 300,  # ~300 bytes per task
-        "dna": len(str(advanced_dna.dna))  # DNA size
-    }
-    total_memory_est = sum(memory_estimation.values())
+    pending_admin_requests = len(admin_request_system.get_pending_requests())
     
     status = {
         "system": {
@@ -5000,9 +6131,9 @@ def system_status():
             "active_components": {
                 "tasks": active_tasks,
                 "games": active_games,
-                "scheduled_reminders": len([t for t in tasks_db if t.get('reminder_time')])
+                "scheduled_reminders": len([t for t in tasks_db if t.get('reminder_time')]),
+                "pending_admin_requests": pending_admin_requests
             },
-            "memory_estimation_bytes": total_memory_est,
             "error_rate": f"{(stats['errors_count'] / max(1, stats['total_messages'])) * 100:.2f}%"
         },
         "evolution": {
@@ -5018,6 +6149,10 @@ def system_status():
                 "enabled": bool(ALPHAVANTAGE_API_KEY),
                 "requests_today": 0  # Could track this
             },
+            "ai": {
+                "enabled": bool(OPENAI_API_KEY),
+                "total_requests": stats['ai_requests']
+            },
             "quiz": {
                 "total_games": sum(len(scores) for scores in quiz_scores_db.values()),
                 "active_games": active_games,
@@ -5027,6 +6162,16 @@ def system_status():
                 "total": len(tasks_db),
                 "completed": len([t for t in tasks_db if t.get('completed')]),
                 "pending": active_tasks
+            },
+            "admin_requests": {
+                "total": len(admin_requests_db),
+                "pending": pending_admin_requests,
+                "approved": len([r for r in admin_requests_db if r.get('status') == 'approved']),
+                "rejected": len([r for r in admin_requests_db if r.get('status') == 'rejected'])
+            },
+            "referrals": {
+                "total": stats['referrals'],
+                "total_users_with_codes": len(referrals_db.get('referral_codes', {}))
             }
         },
         "storage_summary": {
@@ -5034,7 +6179,8 @@ def system_status():
             "messages": len(messages_db),
             "groups": len(groups_db),
             "broadcasts": len(broadcasts_db),
-            "quiz_scores": sum(len(scores) for scores in quiz_scores_db.values())
+            "quiz_scores": sum(len(scores) for scores in quiz_scores_db.values()),
+            "admin_requests": len(admin_requests_db)
         }
     }
     
@@ -5121,13 +6267,17 @@ if __name__ == '__main__':
     logger.info(f"🤖 Bot: {BOT_NAME} (@{BOT_USERNAME}, ID: {BOT_ID})")
     logger.info(f"👑 Admin ID: {ADMIN_USER_ID or 'Not configured'}")
     logger.info(f"💰 Financial API: {'Enabled' if ALPHAVANTAGE_API_KEY else 'Disabled'}")
+    logger.info(f"🤖 OpenAI API: {'Enabled' if OPENAI_API_KEY else 'Disabled'}")
     logger.info(f"🔐 Webhook Secret: {'Set' if WEBHOOK_SECRET and WEBHOOK_SECRET.strip() else 'Not set'}")
     
     logger.info(f"💾 Storage: {len(users_db)} users, {len(groups_db)} groups, "
                 f"{len(messages_db)} messages, {len(tasks_db)} tasks")
+    logger.info(f"📋 Admin Requests: {len(admin_requests_db)} total")
+    logger.info(f"📣 Referrals: {len(referrals_db.get('referral_codes', {}))} users with codes")
     
     logger.info(f"📊 Initial Stats: {stats['total_messages']} messages, "
-                f"{stats['total_users']} users, {stats['active_users']} active")
+                f"{stats['total_users']} users, {stats['active_users']} active, "
+                f"{stats['ai_requests']} AI requests, {stats['admin_requests']} admin requests")
     
     logger.info(f"🌐 Flask starting on port {PORT}")
     logger.info(f"⚙️ Workers: {dispatcher.workers}")
